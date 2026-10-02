@@ -1,0 +1,8 @@
+{
+  "name": "eldab3awy-ai",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@huggingface/inference": "^4.13.0"
+  }
+}
