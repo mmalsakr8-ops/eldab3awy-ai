@@ -78,22 +78,18 @@ function projectPage(user,p,script,chars,scenes,videos){
 <section id="scenes" class="card" style="margin-top:16px"><h2>🎞️ المشاهد</h2><p class="muted">كل مشهد يمكن تحويله الآن إلى فيديو تجريبي بالذكاء الاصطناعي.</p><form method="post" action="/project/${p.id}/scenes/add"><div class="grid2"><div><label class="label">رقم المشهد</label><input class="input" type="number" name="scene_number" min="1" value="${scenes.length?Math.max(...scenes.map(x=>Number(x.scene_number)||0))+1:1}" required><label class="label">عنوان المشهد</label><input class="input" name="title"></div><div><label class="label">المكان</label><input class="input" name="location"><label class="label">الوقت</label><input class="input" name="time_of_day" placeholder="ليل / نهار"></div></div><label class="label">الوصف</label><textarea class="textarea" name="description" style="min-height:110px"></textarea><label class="label">الحوار</label><textarea class="textarea" name="dialogue" style="min-height:110px"></textarea><label class="label">Visual Prompt</label><textarea class="textarea" name="visual_prompt" style="min-height:100px" placeholder="وصف بصري واضح للمشهد والحركة والإضاءة والكاميرا..."></textarea><div class="actions"><button class="btn primary">إضافة المشهد</button></div></form><div class="list" style="margin-top:14px">${scenes.length?scenes.map(s=>{
     const v=videoMap[s.id];
     return `<div class="item" id="scene-${s.id}"><h4>المشهد ${esc(s.scene_number)} — ${esc(s.title||'بدون عنوان')}</h4><div class="muted small">${esc(s.location||'')} ${s.time_of_day?'· '+esc(s.time_of_day):''}</div><p>${esc(s.description||'')}</p>${s.dialogue?`<details><summary>الحوار</summary><p>${esc(s.dialogue)}</p></details>`:''}${s.visual_prompt?`<details><summary>Visual Prompt</summary><p>${esc(s.visual_prompt)}</p></details>`:''}
-<div class="video-box"><h4 style="margin:0 0 8px">🎬 إنشاء فيديو للمشهد</h4><p class="muted small">سيتم استخدام الوصف البصري + المكان + الوقت + الحركة والحوار لبناء Prompt للفيديو.</p><div class="grid2"><div><label class="label">نسبة الفيديو</label><select class="select" id="ratio-${s.id}"><option value="16:9">16:9 — أفقي</option><option value="9:16">9:16 — رأسي</option></select></div><div><label class="label">مدة الاختبار</label><div class="input" style="opacity:.8">مقطع قصير للتجربة</div></div></div><div class="actions"><button type="button" class="btn primary" onclick="createSceneVideo('${p.id}','${s.id}',this)">🎬 إنشاء فيديو</button><span id="video-status-${s.id}" class="muted small"></span></div>${v?`<div class="success small" style="margin-top:10px">آخر عملية توليد: ${esc(v.created_at||'')} · ${esc(v.aspect_ratio||'16:9')} · ${esc(v.model||'')}</div>`:''}<video id="video-${s.id}" controls playsinline preload="metadata" style="display:none;width:100%;max-height:520px;margin-top:12px;border-radius:14px;background:#000"></video></div>
+<div class="video-box"><h4 style="margin:0 0 8px">🎬 إنشاء فيديو للمشهد</h4><p class="muted small">سيتم استخدام الوصف البصري + المكان + الوقت + الحركة والحوار لبناء Prompt للفيديو.</p><div class="grid2"><div><label class="label">نسبة الفيديو</label><select class="select" id="ratio-${s.id}"><option value="16:9">16:9 — أفقي</option><option value="9:16">9:16 — رأسي</option></select></div><div><label class="label">مدة الاختبار</label><div class="input" style="opacity:.8">مقطع قصير للتجربة</div></div></div><div class="actions"><button type="button" class="btn primary" onclick="createSceneVideo('${p.id}','${s.id}')">🎬 إنشاء فيديو</button><span id="video-status-${s.id}" class="muted small"></span></div>${v?`<div class="success small" style="margin-top:10px">آخر عملية توليد: ${esc(v.created_at||'')} · ${esc(v.aspect_ratio||'16:9')} · ${esc(v.model||'')}</div>`:''}<video id="video-${s.id}" controls playsinline preload="metadata" style="display:none;width:100%;max-height:520px;margin-top:12px;border-radius:14px;background:#000"></video></div>
 <form method="post" action="/project/${p.id}/scenes/${s.id}/delete" style="margin-top:12px"><button class="btn danger" type="submit">حذف المشهد</button></form></div>`}).join(''):'<div class="empty">أضف أول مشهد للمشروع.</div>'}</div></section>
 <script>
-async function createSceneVideo(projectId,sceneId,btn){
- const status=document.getElementById('video-status-'+sceneId), video=document.getElementById('video-'+sceneId), ratio=document.getElementById('ratio-'+sceneId).value;
- const oldUrl=video.dataset.objectUrl; if(oldUrl){try{URL.revokeObjectURL(oldUrl)}catch{}}
- video.dataset.objectUrl='';
+async function createSceneVideo(projectId,sceneId){
+ const btn=event&&event.target?event.target:null, status=document.getElementById('video-status-'+sceneId), video=document.getElementById('video-'+sceneId), ratio=document.getElementById('ratio-'+sceneId).value;
  if(btn){btn.disabled=true;btn.dataset.old=btn.textContent;btn.textContent='⏳ جاري إنشاء الفيديو...'}
- status.textContent='⏳ جاري إنشاء الفيديو... قد يستغرق الأمر بعض الوقت حسب مزود الذكاء الاصطناعي.'; video.style.display='none'; video.removeAttribute('src');
+ status.textContent='جاري إرسال المشهد إلى محرك الفيديو...'; video.style.display='none'; video.removeAttribute('src');
  try{
   const r=await fetch('/project/'+encodeURIComponent(projectId)+'/scenes/'+encodeURIComponent(sceneId)+'/video',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({aspect_ratio:ratio})});
-  const ct=(r.headers.get('content-type')||'').toLowerCase();
-  if(!r.ok || ct.includes('application/json')){let msg='تعذر إنشاء الفيديو';try{const d=await r.json();msg=d.error||d.detail||msg}catch{}throw new Error(msg)}
+  if(!r.ok){let msg='تعذر إنشاء الفيديو';try{const d=await r.json();msg=d.error||d.detail||msg}catch{}throw new Error(msg)}
   const blob=await r.blob();
-  if(!blob || !blob.size) throw new Error('محرك الفيديو أعاد ملفًا فارغًا.');
-  const url=URL.createObjectURL(blob);video.dataset.objectUrl=url;video.src=url;video.style.display='block';status.textContent='✅ تم إنشاء الفيديو بنجاح';
+  const url=URL.createObjectURL(blob);video.src=url;video.style.display='block';status.textContent='✅ تم إنشاء الفيديو بنجاح';
   video.onloadeddata=()=>{try{video.scrollIntoView({behavior:'smooth',block:'center'})}catch{}};
  }catch(e){status.textContent='❌ '+(e.message||'حدث خطأ أثناء التوليد')}
  finally{if(btn){btn.disabled=false;btn.textContent=btn.dataset.old||'🎬 إنشاء فيديو'}}
@@ -115,6 +111,7 @@ async function createSceneVideo(req,env,projectId,sceneId,userId){
   if(!env.HF_TOKEN)return json({ok:false,error:'خدمة الفيديو غير مفعلة بعد. أضف Secret باسم HF_TOKEN في Cloudflare.'},503);
   const scene=await env.DB.prepare('SELECT s.* FROM scenes s JOIN projects p ON p.id=s.project_id WHERE s.id=? AND s.project_id=? AND p.user_id=?').bind(sceneId,projectId,userId).first();
   if(!scene)return json({ok:false,error:'المشهد غير موجود أو لا تملك هذا المشروع.'},404);
+
   const b=await body(req);
   const ratio=b.aspect_ratio==='9:16'?'9:16':'16:9';
   const prompt=[
@@ -128,22 +125,53 @@ async function createSceneVideo(req,env,projectId,sceneId,userId){
     `Visual prompt: ${scene.visual_prompt||''}.`,
     'Cinematic realistic movement, coherent characters, natural camera motion, detailed lighting, no subtitles, no text overlays, no logos, no watermark.'
   ].join('\n');
+
   const model='Wan-AI/Wan2.1-T2V-1.3B';
   const videoId=uid();
   try{
-    await env.DB.prepare('INSERT INTO videos(id,project_id,scene_id,prompt,aspect_ratio,status,model) VALUES(?,?,?,?,?,?,?)').bind(videoId,projectId,sceneId,prompt,ratio,'generating',model).run();
+    await env.DB.prepare('INSERT INTO videos(id,project_id,scene_id,prompt,aspect_ratio,status,model) VALUES(?,?,?,?,?,?,?)')
+      .bind(videoId,projectId,sceneId,prompt,ratio,'generating',model).run();
+
     const client=new InferenceClient(env.HF_TOKEN);
-    const output=await client.textToVideo({provider:'auto',model,inputs:prompt,num_frames:17,num_inference_steps:12,guidance_scale:5});
-    if(!output)throw new Error('مزود الفيديو أعاد استجابة فارغة.');
-    const contentType=output?.type||'video/mp4';
+
+    // Current Hugging Face InferenceClient expects task parameters under `parameters`.
+    // Wan2.1-T2V-1.3B is currently served for text-to-video through Fal AI.
+    const output=await client.textToVideo({
+      provider:'fal-ai',
+      model,
+      inputs:prompt,
+      parameters:{
+        num_frames:49,
+        num_inference_steps:20,
+        guidance_scale:5,
+        negative_prompt:'subtitles, text, captions, logo, watermark, distorted face, extra limbs, flicker, low quality'
+      }
+    });
+
     await env.DB.prepare('UPDATE videos SET status=? WHERE id=?').bind('completed',videoId).run();
-    return new Response(output,{status:200,headers:{'content-type':contentType,'cache-control':'no-store','x-video-id':videoId}});
+    return new Response(output,{status:200,headers:{'content-type':'video/mp4','cache-control':'no-store','x-video-id':videoId}});
   }catch(e){
     try{await env.DB.prepare('UPDATE videos SET status=? WHERE id=?').bind('failed',videoId).run()}catch{}
-    return json({ok:false,error:'فشل إنشاء الفيديو.',detail:String(e?.message||e)},502);
+
+    let detail='';
+    try{
+      if(e?.response && typeof e.response.text==='function') detail=await e.response.text();
+      else if(e?.message) detail=e.message;
+      else detail=String(e);
+    }catch{detail=String(e?.message||e)}
+
+    // Never expose the HF token itself.
+    detail=String(detail||'Unknown Hugging Face error').replace(/hf_[A-Za-z0-9_-]+/g,'hf_***');
+    return json({
+      ok:false,
+      error:'فشل إنشاء الفيديو من محرك Hugging Face / Fal AI.',
+      detail:detail.slice(0,3000),
+      model,
+      provider:'fal-ai',
+      video_id:videoId
+    },502);
   }
 }
-
 
 export default {async fetch(req,env){try{await ensureSchema(env);const u=new URL(req.url),path=u.pathname,method=req.method;const user=await currentUser(req,env);
 if(path==='/health')return json({ok:true,service:'eldab3awy-ai',database:'eldab3awy-db',hf_token_configured:Boolean(env.HF_TOKEN),time:now()});
