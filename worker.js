@@ -111,7 +111,6 @@ async function createSceneVideo(req,env,projectId,sceneId,userId){
   if(!env.HF_TOKEN)return json({ok:false,error:'خدمة الفيديو غير مفعلة بعد. أضف Secret باسم HF_TOKEN في Cloudflare.'},503);
   const scene=await env.DB.prepare('SELECT s.* FROM scenes s JOIN projects p ON p.id=s.project_id WHERE s.id=? AND s.project_id=? AND p.user_id=?').bind(sceneId,projectId,userId).first();
   if(!scene)return json({ok:false,error:'المشهد غير موجود أو لا تملك هذا المشروع.'},404);
-
   const b=await body(req);
   const ratio=b.aspect_ratio==='9:16'?'9:16':'16:9';
   const prompt=[
@@ -125,53 +124,20 @@ async function createSceneVideo(req,env,projectId,sceneId,userId){
     `Visual prompt: ${scene.visual_prompt||''}.`,
     'Cinematic realistic movement, coherent characters, natural camera motion, detailed lighting, no subtitles, no text overlays, no logos, no watermark.'
   ].join('\n');
-
   const model='Wan-AI/Wan2.1-T2V-1.3B';
   const videoId=uid();
   try{
-    await env.DB.prepare('INSERT INTO videos(id,project_id,scene_id,prompt,aspect_ratio,status,model) VALUES(?,?,?,?,?,?,?)')
-      .bind(videoId,projectId,sceneId,prompt,ratio,'generating',model).run();
-
+    await env.DB.prepare('INSERT INTO videos(id,project_id,scene_id,prompt,aspect_ratio,status,model) VALUES(?,?,?,?,?,?,?)').bind(videoId,projectId,sceneId,prompt,ratio,'generating',model).run();
     const client=new InferenceClient(env.HF_TOKEN);
-
-    // Current Hugging Face InferenceClient expects task parameters under `parameters`.
-    // Wan2.1-T2V-1.3B is currently served for text-to-video through Fal AI.
-    const output=await client.textToVideo({
-      provider:'fal-ai',
-      model,
-      inputs:prompt,
-      parameters:{
-        num_frames:49,
-        num_inference_steps:20,
-        guidance_scale:5,
-        negative_prompt:'subtitles, text, captions, logo, watermark, distorted face, extra limbs, flicker, low quality'
-      }
-    });
-
+    const output=await client.textToVideo({provider:'fal-ai',model,inputs:prompt,parameters:{num_frames:49,num_inference_steps:20,guidance_scale:5}});
     await env.DB.prepare('UPDATE videos SET status=? WHERE id=?').bind('completed',videoId).run();
     return new Response(output,{status:200,headers:{'content-type':'video/mp4','cache-control':'no-store','x-video-id':videoId}});
   }catch(e){
     try{await env.DB.prepare('UPDATE videos SET status=? WHERE id=?').bind('failed',videoId).run()}catch{}
-
-    let detail='';
-    try{
-      if(e?.response && typeof e.response.text==='function') detail=await e.response.text();
-      else if(e?.message) detail=e.message;
-      else detail=String(e);
-    }catch{detail=String(e?.message||e)}
-
-    // Never expose the HF token itself.
-    detail=String(detail||'Unknown Hugging Face error').replace(/hf_[A-Za-z0-9_-]+/g,'hf_***');
-    return json({
-      ok:false,
-      error:'فشل إنشاء الفيديو من محرك Hugging Face / Fal AI.',
-      detail:detail.slice(0,3000),
-      model,
-      provider:'fal-ai',
-      video_id:videoId
-    },502);
+    return json({ok:false,error:'فشل إنشاء الفيديو.',detail:String(e?.message||e)},502);
   }
 }
+
 
 export default {async fetch(req,env){try{await ensureSchema(env);const u=new URL(req.url),path=u.pathname,method=req.method;const user=await currentUser(req,env);
 if(path==='/health')return json({ok:true,service:'eldab3awy-ai',database:'eldab3awy-db',hf_token_configured:Boolean(env.HF_TOKEN),time:now()});
