@@ -140,7 +140,7 @@ async function createSceneVideo(req,env,projectId,sceneId,userId){
 
 
 export default {async fetch(req,env){try{await ensureSchema(env);const u=new URL(req.url),path=u.pathname,method=req.method;const user=await currentUser(req,env);
-if(path==='/health')return json({ok:true,service:'eldab3awy-ai',database:'eldab3awy-db',time:now()});
+if(path==='/health')return json({ok:true,service:'eldab3awy-ai',database:'eldab3awy-db',hf_token_configured:Boolean(env.HF_TOKEN),time:now()});
 if(path==='/favicon.svg')return new Response(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="16" fill="#f59e0b"/><text x="32" y="43" text-anchor="middle" font-size="34" font-weight="900" font-family="Arial">ض</text></svg>`,{headers:{'content-type':'image/svg+xml'}});
 if(path==='/api/me'){if(!user)return json({user:null});return json({user})}
 if(path==='/api/projects'){if(!user)return json({error:'غير مسجل'},401);const r=await env.DB.prepare('SELECT id,title,genre,tone,language,status,created_at,updated_at FROM projects WHERE user_id=? ORDER BY updated_at DESC').bind(user.id).all();return json({projects:r.results||[]})}
