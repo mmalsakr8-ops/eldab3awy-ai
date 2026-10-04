@@ -87,7 +87,7 @@ async function createSceneVideo(projectId,sceneId){
  status.textContent='جاري إرسال المشهد إلى محرك الفيديو...'; video.style.display='none'; video.removeAttribute('src');
  try{
   const r=await fetch('/project/'+encodeURIComponent(projectId)+'/scenes/'+encodeURIComponent(sceneId)+'/video',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({aspect_ratio:ratio})});
-  if(!r.ok){let msg='تعذر إنشاء الفيديو';try{const d=await r.json();msg=d.error||d.detail||msg}catch{}throw new Error(msg)}
+  if(!r.ok){let msg='تعذر إنشاء الفيديو';try{const d=await r.json();msg=d.detail?((d.error||msg)+' — '+d.detail):(d.error||msg)}catch{}throw new Error(msg)}
   const blob=await r.blob();
   const url=URL.createObjectURL(blob);video.src=url;video.style.display='block';const download=document.getElementById('download-'+sceneId);if(download){download.href=url;download.download='eldab3awy-scene-'+sceneId+'.mp4';download.style.display='inline-flex'}status.textContent='✅ تم إنشاء الفيديو بنجاح — اضغط تنزيل لحفظه على الموبايل';
   video.onloadeddata=()=>{try{video.scrollIntoView({behavior:'smooth',block:'center'})}catch{}};
@@ -128,13 +128,13 @@ async function createSceneVideo(req,env,projectId,sceneId,userId){
   const videoId=uid();
   try{
     await env.DB.prepare('INSERT INTO videos(id,project_id,scene_id,prompt,aspect_ratio,status,model) VALUES(?,?,?,?,?,?,?)').bind(videoId,projectId,sceneId,prompt,ratio,'generating',model).run();
-    const client=new InferenceClient(env.HF_TOKEN);
-    const output=await client.textToVideo({provider:'fal-ai',model,inputs:prompt,num_frames:49,num_inference_steps:20,guidance_scale:5});
+    const client=new InferenceClient(env.HF_TOKEN,{provider:'fal-ai'});
+    const output=await client.textToVideo({model,inputs:prompt,num_frames:49,num_inference_steps:20,guidance_scale:5});
     await env.DB.prepare('UPDATE videos SET status=? WHERE id=?').bind('completed',videoId).run();
     return new Response(output,{status:200,headers:{'content-type':'video/mp4','cache-control':'no-store','x-video-id':videoId}});
   }catch(e){
     try{await env.DB.prepare('UPDATE videos SET status=? WHERE id=?').bind('failed',videoId).run()}catch{}
-    return json({ok:false,error:'فشل إنشاء الفيديو.',detail:String(e?.message||e)},502);
+    return json({ok:false,error:'فشل إنشاء الفيديو.',detail:String(e?.message||e),type:String(e?.name||'Error')},502);
   }
 }
 
