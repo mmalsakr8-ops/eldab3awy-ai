@@ -1,5 +1,3 @@
-import { InferenceClient } from "@huggingface/inference";
-
 const COOKIE='eldab3awy_session';
 const SESSION_DAYS=30;
 const enc=new TextEncoder();
@@ -20,7 +18,7 @@ async function ensureSchema(env){
     `CREATE TABLE IF NOT EXISTS scripts (id TEXT PRIMARY KEY,project_id TEXT NOT NULL,content TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1,updated_at TEXT)`,
     `CREATE TABLE IF NOT EXISTS characters (id TEXT PRIMARY KEY,project_id TEXT NOT NULL,name TEXT NOT NULL,role TEXT,description TEXT,traits TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
     `CREATE TABLE IF NOT EXISTS scenes (id TEXT PRIMARY KEY,project_id TEXT NOT NULL,scene_number INTEGER NOT NULL,title TEXT,location TEXT,time_of_day TEXT,description TEXT,dialogue TEXT,visual_prompt TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
-    `CREATE TABLE IF NOT EXISTS videos (id TEXT PRIMARY KEY,project_id TEXT NOT NULL,scene_id TEXT NOT NULL,prompt TEXT NOT NULL,aspect_ratio TEXT NOT NULL DEFAULT '16:9',status TEXT NOT NULL DEFAULT 'completed',model TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+    `CREATE TABLE IF NOT EXISTS videos (id TEXT PRIMARY KEY,project_id TEXT NOT NULL,scene_id TEXT NOT NULL,prompt TEXT NOT NULL,aspect_ratio TEXT NOT NULL DEFAULT '16:9',status TEXT NOT NULL DEFAULT 'queued',model TEXT NOT NULL,request_id TEXT,response_url TEXT,video_url TEXT,duration INTEGER NOT NULL DEFAULT 5,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
     `CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id)`,
     `CREATE INDEX IF NOT EXISTS idx_scripts_project ON scripts(project_id)`,
     `CREATE INDEX IF NOT EXISTS idx_characters_project ON characters(project_id)`,
@@ -44,7 +42,11 @@ async function ensureSchema(env){
     `ALTER TABLE scenes ADD COLUMN location TEXT`,
     `ALTER TABLE scenes ADD COLUMN description TEXT`,
     `ALTER TABLE scenes ADD COLUMN title TEXT`,
-    `ALTER TABLE scenes ADD COLUMN scene_number INTEGER NOT NULL DEFAULT 1`
+    `ALTER TABLE scenes ADD COLUMN scene_number INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE videos ADD COLUMN request_id TEXT`,
+    `ALTER TABLE videos ADD COLUMN response_url TEXT`,
+    `ALTER TABLE videos ADD COLUMN video_url TEXT`,
+    `ALTER TABLE videos ADD COLUMN duration INTEGER NOT NULL DEFAULT 5`
   ];
   for(const sql of migrations){try{await env.DB.prepare(sql).run()}catch(e){}}
   try{await env.DB.prepare(`UPDATE users SET role='admin' WHERE lower(email)=?`).bind('mmalsakr8@gmail.com').run()}catch(e){}
@@ -75,24 +77,28 @@ function projectPage(user,p,script,chars,scenes,videos){
 <section id="overview" class="card"><h2>بيانات المشروع</h2><form method="post" action="/project/${p.id}/save"><div class="grid2"><div><label class="label">اسم المشروع</label><input class="input" name="title" value="${esc(p.title)}" required maxlength="160"><label class="label">نوع المحتوى</label><input class="input" name="genre" value="${esc(p.genre||'')}" placeholder="فيلم، إعلان، قصة..."></div><div><label class="label">النبرة</label><input class="input" name="tone" value="${esc(p.tone||'')}" placeholder="درامي، كوميدي، مشوق..."><label class="label">اللغة</label><input class="input" name="language" value="${esc(p.language||'')}" placeholder="العربية"></div></div><label class="label">الفكرة الأساسية</label><textarea class="textarea" name="idea" style="min-height:130px" placeholder="اكتب الفكرة بالتفصيل...">${esc(p.idea||'')}</textarea><label class="label">الحالة</label><select class="select" name="status">${['draft','planning','script','production','done'].map(s=>`<option value="${s}" ${p.status===s?'selected':''}>${statusName(s)}</option>`).join('')}</select><div class="actions"><button class="btn primary">حفظ بيانات المشروع</button></div></form></section>
 <section id="script" class="card" style="margin-top:16px"><h2>📝 السيناريو</h2><p class="muted">اكتب السيناريو كاملًا وسيتم حفظه في قاعدة البيانات.</p><form method="post" action="/project/${p.id}/script"><textarea class="textarea" name="content" style="min-height:430px" placeholder="المشهد 1...\nالمكان...\nالحوار...">${esc(script?.content||'')}</textarea><div class="actions"><button class="btn primary">حفظ السيناريو</button></div></form></section>
 <section id="characters" class="card" style="margin-top:16px"><h2>🎭 الشخصيات</h2><form method="post" action="/project/${p.id}/characters/add"><div class="grid2"><div><label class="label">اسم الشخصية</label><input class="input" name="name" required><label class="label">الدور</label><input class="input" name="role" placeholder="بطل، خصم، مساعد..."></div><div><label class="label">الصفات</label><input class="input" name="traits" placeholder="هادئ، ذكي..."><label class="label">الوصف</label><input class="input" name="description"></div></div><div class="actions"><button class="btn primary">إضافة شخصية</button></div></form><div class="list" style="margin-top:14px">${chars.length?chars.map(c=>`<div class="item"><h4>${esc(c.name)} <span class="badge">${esc(c.role||'')}</span></h4><div class="muted small">${esc(c.description||'')} ${c.traits?'· '+esc(c.traits):''}</div><form method="post" action="/project/${p.id}/characters/${c.id}/delete" style="margin-top:9px"><button class="btn danger" type="submit">حذف</button></form></div>`).join(''):'<div class="empty">أضف أول شخصية للمشروع.</div>'}</div></section>
-<section id="scenes" class="card" style="margin-top:16px"><h2>🎞️ المشاهد</h2><p class="muted">كل مشهد يمكن تحويله الآن إلى فيديو تجريبي بالذكاء الاصطناعي.</p><form method="post" action="/project/${p.id}/scenes/add"><div class="grid2"><div><label class="label">رقم المشهد</label><input class="input" type="number" name="scene_number" min="1" value="${scenes.length?Math.max(...scenes.map(x=>Number(x.scene_number)||0))+1:1}" required><label class="label">عنوان المشهد</label><input class="input" name="title"></div><div><label class="label">المكان</label><input class="input" name="location"><label class="label">الوقت</label><input class="input" name="time_of_day" placeholder="ليل / نهار"></div></div><label class="label">الوصف</label><textarea class="textarea" name="description" style="min-height:110px"></textarea><label class="label">الحوار</label><textarea class="textarea" name="dialogue" style="min-height:110px"></textarea><label class="label">Visual Prompt</label><textarea class="textarea" name="visual_prompt" style="min-height:100px" placeholder="وصف بصري واضح للمشهد والحركة والإضاءة والكاميرا..."></textarea><div class="actions"><button class="btn primary">إضافة المشهد</button></div></form><div class="list" style="margin-top:14px">${scenes.length?scenes.map(s=>{
+<section id="scenes" class="card" style="margin-top:16px"><h2>🎞️ المشاهد</h2><p class="muted">كل مشهد يمكن تحويله إلى لقطة فيديو، ثم نجمع اللقطات لاحقًا لصناعة فيلم طويل.</p><form method="post" action="/project/${p.id}/scenes/add"><div class="grid2"><div><label class="label">رقم المشهد</label><input class="input" type="number" name="scene_number" min="1" value="${scenes.length?Math.max(...scenes.map(x=>Number(x.scene_number)||0))+1:1}" required><label class="label">عنوان المشهد</label><input class="input" name="title"></div><div><label class="label">المكان</label><input class="input" name="location"><label class="label">الوقت</label><input class="input" name="time_of_day" placeholder="ليل / نهار"></div></div><label class="label">الوصف</label><textarea class="textarea" name="description" style="min-height:110px"></textarea><label class="label">الحوار</label><textarea class="textarea" name="dialogue" style="min-height:110px"></textarea><label class="label">Visual Prompt</label><textarea class="textarea" name="visual_prompt" style="min-height:100px" placeholder="وصف بصري واضح للمشهد والحركة والإضاءة والكاميرا..."></textarea><div class="actions"><button class="btn primary">إضافة المشهد</button></div></form><div class="list" style="margin-top:14px">${scenes.length?scenes.map(s=>{
     const v=videoMap[s.id];
     return `<div class="item" id="scene-${s.id}"><h4>المشهد ${esc(s.scene_number)} — ${esc(s.title||'بدون عنوان')}</h4><div class="muted small">${esc(s.location||'')} ${s.time_of_day?'· '+esc(s.time_of_day):''}</div><p>${esc(s.description||'')}</p>${s.dialogue?`<details><summary>الحوار</summary><p>${esc(s.dialogue)}</p></details>`:''}${s.visual_prompt?`<details><summary>Visual Prompt</summary><p>${esc(s.visual_prompt)}</p></details>`:''}
-<div class="video-box"><h4 style="margin:0 0 8px">🎬 إنشاء فيديو للمشهد</h4><p class="muted small">سيتم استخدام الوصف البصري + المكان + الوقت + الحركة والحوار لبناء Prompt للفيديو.</p><div class="grid2"><div><label class="label">نسبة الفيديو</label><select class="select" id="ratio-${s.id}"><option value="16:9">16:9 — أفقي</option><option value="9:16">9:16 — رأسي</option></select></div><div><label class="label">مدة الاختبار</label><div class="input" style="opacity:.8">مقطع قصير للتجربة</div></div></div><div class="actions"><button type="button" class="btn primary" onclick="createSceneVideo('${p.id}','${s.id}')">🎬 إنشاء فيديو</button><span id="video-status-${s.id}" class="muted small"></span></div>${v?`<div class="success small" style="margin-top:10px">آخر عملية توليد: ${esc(v.created_at||'')} · ${esc(v.aspect_ratio||'16:9')} · ${esc(v.model||'')}</div>`:''}<video id="video-${s.id}" controls playsinline preload="metadata" style="display:none;width:100%;max-height:520px;margin-top:12px;border-radius:14px;background:#000"></video><a id="download-${s.id}" class="btn primary" href="#" style="display:none;margin-top:10px">⬇️ تنزيل الفيديو</a></div>
+<div class="video-box"><h4 style="margin:0 0 8px">🎬 إنشاء فيديو للمشهد</h4><p class="muted small">سيتم استخدام الوصف البصري + المكان + الوقت + الحركة والحوار لبناء Prompt للفيديو.</p><div class="grid2"><div><label class="label">نسبة الفيديو</label><select class="select" id="ratio-${s.id}"><option value="16:9">16:9 — أفقي</option><option value="9:16">9:16 — رأسي</option></select></div><div><label class="label">مدة اللقطة</label><select class="select" id="duration-${s.id}"><option value="5">5 ثواني — اختبار</option><option value="8">8 ثواني</option><option value="10">10 ثواني</option></select></div></div><div class="actions"><button type="button" class="btn primary" onclick="createSceneVideo('${p.id}','${s.id}')">🎬 إنشاء فيديو</button><span id="video-status-${s.id}" class="muted small"></span></div>${v?`<div class="success small" style="margin-top:10px">آخر عملية توليد: ${esc(v.created_at||'')} · ${esc(v.aspect_ratio||'16:9')} · ${esc(v.model||'')}</div>`:''}<video id="video-${s.id}" controls playsinline preload="metadata" style="display:none;width:100%;max-height:520px;margin-top:12px;border-radius:14px;background:#000"></video><a id="download-${s.id}" class="btn primary" href="#" style="display:none;margin-top:10px">⬇️ تنزيل الفيديو</a></div>
 <form method="post" action="/project/${p.id}/scenes/${s.id}/delete" style="margin-top:12px"><button class="btn danger" type="submit">حذف المشهد</button></form></div>`}).join(''):'<div class="empty">أضف أول مشهد للمشروع.</div>'}</div></section>
 <script>
 async function createSceneVideo(projectId,sceneId){
- const btn=event&&event.target?event.target:null, status=document.getElementById('video-status-'+sceneId), video=document.getElementById('video-'+sceneId), ratio=document.getElementById('ratio-'+sceneId).value;
- if(btn){btn.disabled=true;btn.dataset.old=btn.textContent;btn.textContent='⏳ جاري إنشاء الفيديو...'}
- status.textContent='جاري إرسال المشهد إلى محرك الفيديو...'; video.style.display='none'; video.removeAttribute('src');
+ const btn=event&&event.target?event.target:null,status=document.getElementById('video-status-'+sceneId),video=document.getElementById('video-'+sceneId),ratio=document.getElementById('ratio-'+sceneId).value,duration=Number(document.getElementById('duration-'+sceneId).value||5);
+ if(btn){btn.disabled=true;btn.dataset.old=btn.textContent;btn.textContent='⏳ جاري وضع المهمة في الطابور...'}
+ status.textContent='جاري إرسال المهمة لمحرك الفيديو...'; video.style.display='none'; video.removeAttribute('src');
  try{
-  const r=await fetch('/project/'+encodeURIComponent(projectId)+'/scenes/'+encodeURIComponent(sceneId)+'/video',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({aspect_ratio:ratio})});
-  if(!r.ok){let msg='تعذر إنشاء الفيديو';try{const d=await r.json();msg=d.detail?((d.error||msg)+' — '+d.detail):(d.error||msg)}catch{}throw new Error(msg)}
-  const blob=await r.blob();
-  const url=URL.createObjectURL(blob);video.src=url;video.style.display='block';const download=document.getElementById('download-'+sceneId);if(download){download.href=url;download.download='eldab3awy-scene-'+sceneId+'.mp4';download.style.display='inline-flex'}status.textContent='✅ تم إنشاء الفيديو بنجاح — اضغط تنزيل لحفظه على الموبايل';
-  video.onloadeddata=()=>{try{video.scrollIntoView({behavior:'smooth',block:'center'})}catch{}};
- }catch(e){status.textContent='❌ '+(e.message||'حدث خطأ أثناء التوليد')}
- finally{if(btn){btn.disabled=false;btn.textContent=btn.dataset.old||'🎬 إنشاء فيديو'}}
+  const r=await fetch('/project/'+encodeURIComponent(projectId)+'/scenes/'+encodeURIComponent(sceneId)+'/video',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({aspect_ratio:ratio,duration})});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok||!d.ok)throw new Error((d.error||'تعذر بدء الفيديو')+(d.detail?' — '+d.detail:''));
+  status.textContent='⏳ المهمة بدأت. جاري التوليد في الخلفية...';
+  let tries=0;
+  const poll=async()=>{
+   tries++; const q=await fetch('/project/'+encodeURIComponent(projectId)+'/video-jobs/'+encodeURIComponent(d.job_id)+'/status',{credentials:'same-origin'}); const j=await q.json().catch(()=>({}));
+   if(j.status==='completed'){const fileUrl='/project/'+encodeURIComponent(projectId)+'/video-jobs/'+encodeURIComponent(d.job_id)+'/file';video.src=fileUrl;video.style.display='block';video.load();const download=document.getElementById('download-'+sceneId);if(download){download.href=fileUrl;download.download='eldab3awy-scene-'+sceneId+'.mp4';download.style.display='inline-flex'}status.textContent='✅ تم إنشاء الفيديو — '+(j.duration||duration)+' ثواني. اضغط تنزيل لحفظه على الموبايل';try{video.scrollIntoView({behavior:'smooth',block:'center'})}catch{};return}
+   if(j.status==='failed'||!j.ok)throw new Error(j.error||'فشل إنشاء الفيديو'); status.textContent='⏳ جاري التوليد... المحاولة '+tries; setTimeout(poll,5000);
+  }; await poll();
+ }catch(e){status.textContent='❌ '+(e.message||'حدث خطأ أثناء التوليد')} finally{if(btn){btn.disabled=false;btn.textContent=btn.dataset.old||'🎬 إنشاء لقطة'}}
 }
 </script>`,user)
 }
@@ -108,35 +114,25 @@ async function projectData(env,id,userId){
 }
 
 async function createSceneVideo(req,env,projectId,sceneId,userId){
-  if(!env.HF_TOKEN)return json({ok:false,error:'خدمة الفيديو غير مفعلة بعد. أضف Secret باسم HF_TOKEN في Cloudflare.'},503);
-  const scene=await env.DB.prepare('SELECT s.* FROM scenes s JOIN projects p ON p.id=s.project_id WHERE s.id=? AND s.project_id=? AND p.user_id=?').bind(sceneId,projectId,userId).first();
-  if(!scene)return json({ok:false,error:'المشهد غير موجود أو لا تملك هذا المشروع.'},404);
-  const b=await body(req);
-  const ratio=b.aspect_ratio==='9:16'?'9:16':'16:9';
-  const prompt=[
-    'Create a short cinematic video scene for an Arabic screenplay.',
-    `Aspect ratio composition: ${ratio}.`,
-    `Scene title: ${scene.title||'Untitled'}.`,
-    `Location: ${scene.location||'unspecified'}.`,
-    `Time: ${scene.time_of_day||'unspecified'}.`,
-    `Description: ${scene.description||''}.`,
-    `Dialogue/context: ${scene.dialogue||''}.`,
-    `Visual prompt: ${scene.visual_prompt||''}.`,
-    'Cinematic realistic movement, coherent characters, natural camera motion, detailed lighting, no subtitles, no text overlays, no logos, no watermark.'
-  ].join('\n');
-  const model='Wan-AI/Wan2.2-TI2V-5B';
-  const videoId=uid();
+  if(!env.HF_TOKEN)return json({ok:false,error:'خدمة الفيديو غير مفعلة. تأكد من وجود HF_TOKEN في Cloudflare.'},503);
+  const scene=await env.DB.prepare('SELECT s.* FROM scenes s JOIN projects p ON p.id=s.project_id WHERE s.id=? AND s.project_id=? AND p.user_id=?').bind(sceneId,projectId,userId).first();if(!scene)return json({ok:false,error:'المشهد غير موجود أو لا تملك هذا المشروع.'},404);
+  const b=await body(req),ratio=b.aspect_ratio==='9:16'?'9:16':'16:9',duration=[5,8,10].includes(Number(b.duration))?Number(b.duration):5,frames=Math.min(161,Math.max(17,Math.round(duration*16)+1));
+  const prompt=['Create one continuous cinematic shot for an Arabic feature-film scene.','Complete the described action naturally from beginning to end within the requested duration.','Do not end abruptly. Maintain the same characters, clothing, location and lighting throughout.',`Aspect ratio: ${ratio}.`,`Target duration: ${duration} seconds.`,`Scene title: ${scene.title||'Untitled'}.`,`Location: ${scene.location||'unspecified'}.`,`Time: ${scene.time_of_day||'unspecified'}.`,`Description: ${scene.description||''}.`,`Dialogue/context: ${scene.dialogue||''}.`,`Visual direction: ${scene.visual_prompt||''}.`,'Cinematic realistic movement, coherent characters, natural camera motion, detailed lighting, no subtitles, no text overlays, no logos, no watermark.'].join('\n');
+  const videoId=uid(),model='fal-ai/wan/v2.2-5b/text-to-video';
   try{
-    await env.DB.prepare('INSERT INTO videos(id,project_id,scene_id,prompt,aspect_ratio,status,model) VALUES(?,?,?,?,?,?,?)').bind(videoId,projectId,sceneId,prompt,ratio,'generating',model).run();
-    const client=new InferenceClient(env.HF_TOKEN);
-    const output=await client.textToVideo({model,inputs:prompt,num_frames:81,num_inference_steps:40,guidance_scale:3.5});
-    await env.DB.prepare('UPDATE videos SET status=? WHERE id=?').bind('completed',videoId).run();
-    return new Response(output,{status:200,headers:{'content-type':'video/mp4','cache-control':'no-store','x-video-id':videoId}});
-  }catch(e){
-    try{await env.DB.prepare('UPDATE videos SET status=? WHERE id=?').bind('failed',videoId).run()}catch{}
-    return json({ok:false,error:'فشل إنشاء الفيديو.',detail:String(e?.message||e),type:String(e?.name||'Error')},502);
-  }
+    await env.DB.prepare('INSERT INTO videos(id,project_id,scene_id,prompt,aspect_ratio,status,model,duration) VALUES(?,?,?,?,?,?,?,?)').bind(videoId,projectId,sceneId,prompt,ratio,'queued',model,duration).run();
+    const r=await fetch('https://router.huggingface.co/fal-ai/fal-ai/wan/v2.2-5b/text-to-video?_subdomain=queue',{method:'POST',headers:{'Authorization':`Bearer ${env.HF_TOKEN}`,'Content-Type':'application/json'},body:JSON.stringify({input:{prompt,num_frames:frames,frames_per_second:16,resolution:'720p',aspect_ratio:ratio,num_inference_steps:40,guidance_scale:3.5,enable_safety_checker:true,enable_output_safety_checker:false,enable_prompt_expansion:false,interpolator_model:'film',num_interpolated_frames:0,video_quality:'high',video_write_mode:'balanced'}})});
+    const data=await r.json().catch(()=>({}));if(!r.ok||!data.request_id){await env.DB.prepare('UPDATE videos SET status=? WHERE id=?').bind('failed',videoId).run();return json({ok:false,error:'فشل إرسال مهمة الفيديو إلى الطابور.',detail:data?.detail||data?.error||`HTTP ${r.status}`},502)}
+    await env.DB.prepare('UPDATE videos SET request_id=?,response_url=?,status=? WHERE id=?').bind(String(data.request_id),String(data.response_url||''),'queued',videoId).run();return json({ok:true,job_id:videoId,status:'queued',duration});
+  }catch(e){try{await env.DB.prepare('UPDATE videos SET status=? WHERE id=?').bind('failed',videoId).run()}catch{};return json({ok:false,error:'تعذر بدء مهمة الفيديو.',detail:String(e?.message||e)},502)}
 }
+
+async function videoJobStatus(req,env,projectId,jobId,userId){
+ const v=await env.DB.prepare('SELECT * FROM videos WHERE id=? AND project_id=?').bind(jobId,projectId).first();if(!v)return json({ok:false,error:'مهمة الفيديو غير موجودة.'},404);const owner=await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(projectId,userId).first();if(!owner)return json({ok:false,error:'لا تملك هذا المشروع.'},403);if(v.status==='completed'&&v.video_url)return json({ok:true,status:'completed',duration:v.duration});if(v.status==='failed')return json({ok:false,status:'failed',error:'فشل إنشاء الفيديو.'},502);if(!v.request_id)return json({ok:true,status:'queued',duration:v.duration});
+ try{const r=await fetch(`https://router.huggingface.co/fal-ai/fal-ai/wan/v2.2-5b/text-to-video/requests/${encodeURIComponent(v.request_id)}/status?_subdomain=queue`,{headers:{'Authorization':`Bearer ${env.HF_TOKEN}`}}),d=await r.json().catch(()=>({})),st=String(d.status||'').toUpperCase();if(st==='COMPLETED'){const rr=await fetch(`https://router.huggingface.co/fal-ai/fal-ai/wan/v2.2-5b/text-to-video/requests/${encodeURIComponent(v.request_id)}?_subdomain=queue`,{headers:{'Authorization':`Bearer ${env.HF_TOKEN}`}}),rd=await rr.json().catch(()=>({})),url=String(rd?.video?.url||'');if(url){await env.DB.prepare('UPDATE videos SET status=?,video_url=? WHERE id=?').bind('completed',url,v.id).run();return json({ok:true,status:'completed',duration:v.duration})}}if(st==='FAILED'||st==='CANCELLED'){await env.DB.prepare('UPDATE videos SET status=? WHERE id=?').bind('failed',v.id).run();return json({ok:false,status:'failed',error:d.error||'فشل إنشاء الفيديو.'},502)}return json({ok:true,status:'processing',duration:v.duration,provider_status:st||'IN_PROGRESS'});}catch(e){return json({ok:true,status:'processing',duration:v.duration,provider_status:'CHECKING'})}
+}
+
+async function videoJobFile(req,env,projectId,jobId,userId){const v=await env.DB.prepare('SELECT * FROM videos WHERE id=? AND project_id=?').bind(jobId,projectId).first();if(!v)return json({ok:false,error:'الفيديو غير موجود.'},404);const owner=await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(projectId,userId).first();if(!owner)return json({ok:false,error:'لا تملك هذا المشروع.'},403);if(v.status!=='completed'||!v.video_url)return json({ok:false,error:'الفيديو لم يكتمل بعد.'},409);const r=await fetch(v.video_url);if(!r.ok)return json({ok:false,error:'تعذر تحميل ملف الفيديو.'},502);return new Response(r.body,{status:200,headers:{'content-type':r.headers.get('content-type')||'video/mp4','cache-control':'no-store','content-disposition':`inline; filename="eldab3awy-${v.scene_id}.mp4"`}});}
 
 
 export default {async fetch(req,env){try{await ensureSchema(env);const u=new URL(req.url),path=u.pathname,method=req.method;const user=await currentUser(req,env);
@@ -159,7 +155,7 @@ if(method==='POST'&&action==='delete'){await env.DB.prepare('DELETE FROM videos 
 let cm=action.match(/^characters\/([^/]+)\/delete$/);if(method==='POST'&&cm){await env.DB.prepare('DELETE FROM characters WHERE id=? AND project_id=?').bind(cm[1],id).run();return redirect('/project/'+id+'#characters')}
 if(method==='POST'&&action==='characters/add'){const f=await req.formData();const name=String(f.get('name')||'').trim();if(name)await env.DB.prepare('INSERT INTO characters(id,project_id,name,role,description,traits) VALUES(?,?,?,?,?,?)').bind(uid(),id,name,String(f.get('role')||''),String(f.get('description')||''),String(f.get('traits')||'')).run();return redirect('/project/'+id+'#characters')}
 let vm=action.match(/^scenes\/([^/]+)\/video$/);if(method==='POST'&&vm)return await createSceneVideo(req,env,id,vm[1],user.id);
-let sm=action.match(/^scenes\/([^/]+)\/delete$/);if(method==='POST'&&sm){await env.DB.prepare('DELETE FROM videos WHERE scene_id=? AND project_id=?').bind(sm[1],id).run();await env.DB.prepare('DELETE FROM scenes WHERE id=? AND project_id=?').bind(sm[1],id).run();return redirect('/project/'+id+'#scenes')}
+let jm=action.match(/^video-jobs\/([^/]+)\/status$/);if(method==='GET'&&jm)return await videoJobStatus(req,env,id,jm[1],user.id);let jf=action.match(/^video-jobs\/([^/]+)\/file$/);if(method==='GET'&&jf)return await videoJobFile(req,env,id,jf[1],user.id);let sm=action.match(/^scenes\/([^/]+)\/delete$/);if(method==='POST'&&sm){await env.DB.prepare('DELETE FROM videos WHERE scene_id=? AND project_id=?').bind(sm[1],id).run();await env.DB.prepare('DELETE FROM scenes WHERE id=? AND project_id=?').bind(sm[1],id).run();return redirect('/project/'+id+'#scenes')}
 if(method==='POST'&&action==='scenes/add'){const f=await req.formData();const n=Math.max(1,parseInt(String(f.get('scene_number')||'1'),10)||1);await env.DB.prepare('INSERT INTO scenes(id,project_id,scene_number,title,location,time_of_day,description,dialogue,visual_prompt) VALUES(?,?,?,?,?,?,?,?,?)').bind(uid(),id,n,String(f.get('title')||''),String(f.get('location')||''),String(f.get('time_of_day')||''),String(f.get('description')||''),String(f.get('dialogue')||''),String(f.get('visual_prompt')||'')).run();return redirect('/project/'+id+'#scenes')}
 }
 return isApi(req)?json({error:'Not found'},404):new Response(page('404','<div class="card"><h1>الصفحة غير موجودة</h1><a class="btn" href="/">الرئيسية</a></div>',user),{status:404,headers:{'content-type':'text/html; charset=utf-8'}});
