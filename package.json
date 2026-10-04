@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@huggingface/inference": "^4.13.30"
+    "@huggingface/inference": "^4.13.0"
   }
 }

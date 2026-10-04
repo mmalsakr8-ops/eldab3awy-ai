@@ -1,7 +1,7 @@
 {
   "name": "eldab3awy-ai",
   "main": "worker.js",
-  "compatibility_date": "2026-09-27",
+  "compatibility_date": "2026-10-04",
   "d1_databases": [
     {
       "binding": "DB",
