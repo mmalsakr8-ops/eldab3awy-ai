@@ -124,12 +124,12 @@ async function createSceneVideo(req,env,projectId,sceneId,userId){
     `Visual prompt: ${scene.visual_prompt||''}.`,
     'Cinematic realistic movement, coherent characters, natural camera motion, detailed lighting, no subtitles, no text overlays, no logos, no watermark.'
   ].join('\n');
-  const model='Wan-AI/Wan2.1-T2V-1.3B';
+  const model='Wan-AI/Wan2.2-TI2V-5B';
   const videoId=uid();
   try{
     await env.DB.prepare('INSERT INTO videos(id,project_id,scene_id,prompt,aspect_ratio,status,model) VALUES(?,?,?,?,?,?,?)').bind(videoId,projectId,sceneId,prompt,ratio,'generating',model).run();
-    const client=new InferenceClient(env.HF_TOKEN,{provider:'fal-ai'});
-    const output=await client.textToVideo({model,inputs:prompt,num_frames:49,num_inference_steps:20,guidance_scale:5});
+    const client=new InferenceClient(env.HF_TOKEN);
+    const output=await client.textToVideo({model,inputs:prompt,num_frames:81,num_inference_steps:40,guidance_scale:3.5});
     await env.DB.prepare('UPDATE videos SET status=? WHERE id=?').bind('completed',videoId).run();
     return new Response(output,{status:200,headers:{'content-type':'video/mp4','cache-control':'no-store','x-video-id':videoId}});
   }catch(e){
