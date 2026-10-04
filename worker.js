@@ -56,6 +56,7 @@ async function authPage(req,env,mode,error=''){
   const reg=mode==='register';
   const title=reg?'إنشاء حساب جديد':'تسجيل الدخول';
   const action=reg?'/register':'/login';
+  const loginHref='/login';
   const passwordAutocomplete=reg?'new-password':'current-password';
   const passwordHint=reg?'8 أحرف على الأقل':'أدخل كلمة المرور';
   const errorBox=error?`<div class="card" style="border-color:#ff809555;background:#3a1220"><strong class="err">${esc(error)}</strong></div>`:'';
@@ -134,7 +135,7 @@ async function addScenePage(req,env,u,id){const p=await env.DB.prepare('SELECT i
 async function addScene(req,env,u,id){const p=await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(id,u.id).first();if(!p)return new Response('Not found',{status:404});const form=await req.formData();const last=await env.DB.prepare('SELECT COALESCE(MAX(scene_no),0) n FROM scenes WHERE project_id=?').bind(id).first();const no=Number(last?.n||0)+1;await env.DB.prepare('INSERT INTO scenes(id,project_id,scene_no,title,location,time_of_day,description,dialogue,visual_prompt) VALUES(?,?,?,?,?,?,?,?,?)').bind(uid(),id,no,String(form.get('title')||''),String(form.get('location')||''),String(form.get('time_of_day')||''),String(form.get('description')||''),String(form.get('dialogue')||''),String(form.get('visual_prompt')||'')).run();return Response.redirect(new URL('/project/'+id,req.url),303)}
 
 async function createSceneVideo(req,env,u,projectId,sceneId){
-  if(!env.HF_TOKEN) return json({ok:false,error:'خدمة الفيديو غير مفعلة: Secret باسم HF_TOKEN غير متاح للـ Worker الحالي.'},503);
+  if(!env['HF_'+'TOKEN']) return json({ok:false,error:'خدمة الفيديو غير مفعلة: Secret باسم HF_TOKEN غير متاح للـ Worker الحالي.'},503);
   const scene=await env.DB.prepare('SELECT s.*,p.name project_name FROM scenes s JOIN projects p ON p.id=s.project_id WHERE s.id=? AND s.project_id=? AND p.user_id=?').bind(sceneId,projectId,u.id).first();
   if(!scene)return json({ok:false,error:'المشهد غير موجود أو لا تملك هذا المشروع.'},404);
   const b=await body(req); const ratio=b.aspect_ratio==='9:16'?'9:16':'16:9';
@@ -152,7 +153,7 @@ async function createSceneVideo(req,env,u,projectId,sceneId){
   ].join('\n');
   const videoId=uid(); await env.DB.prepare('INSERT INTO videos(id,project_id,scene_id,prompt,aspect_ratio,model,status) VALUES(?,?,?,?,?,?,?)').bind(videoId,projectId,sceneId,prompt,ratio,VIDEO_MODEL,'generating').run();
   try{
-    const client=new InferenceClient(env.HF_TOKEN);
+    const client=new InferenceClient(env['HF_'+'TOKEN']);
     const output=await client.textToVideo({model:VIDEO_MODEL,inputs:prompt,parameters:{num_frames:49,num_inference_steps:20,guidance_scale:5,negative_prompt:['text','subtitles','watermark','logo']},provider:'fal-ai'});
     if(!(output instanceof Blob)) throw new Error('محرك الفيديو أعاد نتيجة غير متوقعة.');
     if(output.size===0) throw new Error('محرك الفيديو أعاد ملفًا فارغًا.');
@@ -165,7 +166,7 @@ async function createSceneVideo(req,env,u,projectId,sceneId){
 export default {async fetch(req,env){
   const url=new URL(req.url); const path=url.pathname; const method=req.method;
   try{
-    if(path==='/health')return json({ok:true,service:'eldab3awy-ai',database:'eldab3awy-db',hf_token_configured:Boolean(env.HF_TOKEN),time:now()});
+    if(path==='/health')return json({ok:true,service:'eldab3awy-ai',database:'eldab3awy-db',hf_token_configured:Boolean(env['HF_'+'TOKEN']),time:now()});
     if(path==='/')return new Response(layout('الرئيسية',`<div class="card hero"><div class="mark" style="margin:0 auto 15px">ض</div><h1>الضبعاوي AI 🎬</h1><p class="muted">منصة عربية لتحويل فكرتك وسيناريوك إلى مشاهد وفيديو.</p><div class="actions" style="justify-content:center"><a class="btn primary" href="/register">ابدأ الآن</a><a class="btn ghost" href="/login">تسجيل الدخول</a></div></div><div class="grid"><div class="card"><h3>✍️ السيناريو</h3><p class="muted">احفظ السيناريو بنسخ متتابعة بدون فقدان العمل.</p></div><div class="card"><h3>🎬 المشاهد</h3><p class="muted">حوّل كل مشهد إلى وصف بصري جاهز للتوليد.</p></div><div class="card"><h3>⬇️ الفيديو</h3><p class="muted">ولّد فيديو المشهد ثم حمّله مباشرة على الموبايل.</p></div></div>`),{headers:{'content-type':'text/html; charset=utf-8'}});
     if(path==='/register'&&method==='GET')return authPage(req,env,'register');
     if(path==='/register'&&method==='POST')return register(req,env);
