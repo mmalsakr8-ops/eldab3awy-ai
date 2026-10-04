@@ -52,16 +52,16 @@ function layout(title,content,user=null){
   </style></head><body><div class="wrap"><nav class="nav"><a class="brand" href="/"><span class="mark">ض</span><span>الضبعاوي AI<small>من الفكرة إلى الفيلم</small></span></a>${user?`<div class="actions"><a class="btn ghost" href="/dashboard">لوحة التحكم</a><form method="post" action="/logout"><button class="btn ghost">خروج</button></form></div>`:''}</nav>${content}<div class="footer">جميع الحقوق محفوظة بواسطة M/ Mohamed Abdalazim</div></div></body></html>`;
 }
 
-async function authPage(req,env,mode,error=''){
-  const reg=mode==='register';
-  const title=reg?'إنشاء حساب جديد':'تسجيل الدخول';
-  const action=reg?'/register':'/login';
-  const loginHref='/login';
-  const passwordAutocomplete=reg?'new-password':'current-password';
-  const passwordHint=reg?'8 أحرف على الأقل':'أدخل كلمة المرور';
+function authResponse(title,content){
+  return new Response(layout(title,content),{status:200,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store, no-cache, must-revalidate, max-age=0','pragma':'no-cache'}});
+}
+function loginPage(error=''){
   const errorBox=error?`<div class="card" style="border-color:#ff809555;background:#3a1220"><strong class="err">${esc(error)}</strong></div>`:'';
-  const nameField=reg?'<div class="field"><label>الاسم</label><input name="name" required maxlength="80" autocomplete="name" placeholder="اكتب اسمك"></div>':'';
-  return new Response(layout(title,`${errorBox}<div class="card" style="max-width:520px;margin:45px auto"><h1>${title}</h1><p class="muted">${reg?'أنشئ حسابك مرة واحدة وابدأ مشروعك السينمائي مباشرة.':'أدخل بيانات حسابك للمتابعة.'}</p><form method="post" action="${action}" autocomplete="${reg?'on':'on'}">${nameField}<div class="field"><label>البريد الإلكتروني</label><input type="email" name="email" required maxlength="160" autocomplete="email" placeholder="name@example.com"></div><div class="field"><label>كلمة المرور</label><input type="password" name="password" required minlength="8" maxlength="128" autocomplete="${passwordAutocomplete}" placeholder="${passwordHint}"></div><button class="btn primary" type="submit" style="width:100%">${reg?'إنشاء الحساب والبدء':'دخول'}</button></form><p class="muted" style="margin-bottom:0;text-align:center">${reg?'لديك حساب بالفعل؟ <a href="/login">تسجيل الدخول</a>':'ليس لديك حساب؟ <a href="/register">إنشاء حساب جديد</a>'}</p></div>`),null,{headers:{'content-type':'text/html; charset=utf-8'}});
+  return authResponse('تسجيل الدخول',`${errorBox}<div class="card" style="max-width:520px;margin:45px auto"><h1>تسجيل الدخول</h1><p class="muted">أدخل بيانات حسابك للمتابعة إلى مشروعك.</p><form method="post" action="/login" autocomplete="on"><div class="field"><label>البريد الإلكتروني</label><input type="email" name="email" required maxlength="160" autocomplete="email" placeholder="name@example.com"></div><div class="field"><label>كلمة المرور</label><input type="password" name="password" required minlength="8" maxlength="128" autocomplete="current-password" placeholder="أدخل كلمة المرور"></div><button class="btn primary" type="submit" style="width:100%">دخول</button></form><p class="muted" style="margin-bottom:0;text-align:center">ليس لديك حساب؟ <a href="/register">إنشاء حساب جديد</a></p></div>`);
+}
+function registerPage(error=''){
+  const errorBox=error?`<div class="card" style="border-color:#ff809555;background:#3a1220"><strong class="err">${esc(error)}</strong></div>`:'';
+  return authResponse('إنشاء حساب جديد',`${errorBox}<div class="card" style="max-width:520px;margin:45px auto"><h1>إنشاء حساب جديد</h1><p class="muted">أنشئ حسابك مرة واحدة وابدأ مشروعك السينمائي مباشرة.</p><form method="post" action="/register" autocomplete="on"><div class="field"><label>الاسم</label><input name="name" required maxlength="80" autocomplete="name" placeholder="اكتب اسمك"></div><div class="field"><label>البريد الإلكتروني</label><input type="email" name="email" required maxlength="160" autocomplete="email" placeholder="name@example.com"></div><div class="field"><label>كلمة المرور</label><input type="password" name="password" required minlength="8" maxlength="128" autocomplete="new-password" placeholder="8 أحرف على الأقل"></div><button class="btn primary" type="submit" style="width:100%">إنشاء الحساب والبدء</button></form><p class="muted" style="margin-bottom:0;text-align:center">لديك حساب بالفعل؟ <a href="/login">تسجيل الدخول</a></p></div>`);
 }
 
 async function register(req,env){
@@ -70,11 +70,11 @@ async function register(req,env){
     const name=String(form.get('name')||'').trim();
     const email=String(form.get('email')||'').trim().toLowerCase();
     const password=String(form.get('password')||'');
-    if(name.length<2)return authPage(req,env,'register','اكتب اسمًا صحيحًا.');
-    if(!email)return authPage(req,env,'register','اكتب البريد الإلكتروني.');
-    if(password.length<8)return authPage(req,env,'register','كلمة المرور يجب أن تكون 8 أحرف على الأقل.');
+    if(name.length<2)return registerPage('اكتب اسمًا صحيحًا.');
+    if(!email)return registerPage('اكتب البريد الإلكتروني.');
+    if(password.length<8)return registerPage('كلمة المرور يجب أن تكون 8 أحرف على الأقل.');
     const exists=await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
-    if(exists)return authPage(req,env,'register','هذا البريد الإلكتروني مستخدم بالفعل. يمكنك تسجيل الدخول بدلًا من إنشاء حساب جديد.');
+    if(exists)return registerPage('هذا البريد الإلكتروني مستخدم بالفعل. يمكنك تسجيل الدخول بدلًا من إنشاء حساب جديد.');
     const role=email===ADMIN_EMAIL?'admin':'user';
     const id=uid();
     const ph=await hashPassword(password);
@@ -85,7 +85,7 @@ async function register(req,env){
     await env.DB.prepare('INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?,?,?,?)').bind(uid(),id,th,expires).run();
     return new Response(null,{status:303,headers:{Location:'/dashboard','Set-Cookie':cookie(COOKIE,token,SESSION_DAYS*86400)}});
   }catch(e){
-    return authPage(req,env,'register','تعذر إنشاء الحساب حاليًا. تأكد أن قاعدة البيانات جاهزة ثم حاول مرة أخرى.');
+    return registerPage('تعذر إنشاء الحساب حاليًا. تأكد أن قاعدة البيانات جاهزة ثم حاول مرة أخرى.');
   }
 }
 
@@ -135,7 +135,7 @@ async function addScenePage(req,env,u,id){const p=await env.DB.prepare('SELECT i
 async function addScene(req,env,u,id){const p=await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(id,u.id).first();if(!p)return new Response('Not found',{status:404});const form=await req.formData();const last=await env.DB.prepare('SELECT COALESCE(MAX(scene_no),0) n FROM scenes WHERE project_id=?').bind(id).first();const no=Number(last?.n||0)+1;await env.DB.prepare('INSERT INTO scenes(id,project_id,scene_no,title,location,time_of_day,description,dialogue,visual_prompt) VALUES(?,?,?,?,?,?,?,?,?)').bind(uid(),id,no,String(form.get('title')||''),String(form.get('location')||''),String(form.get('time_of_day')||''),String(form.get('description')||''),String(form.get('dialogue')||''),String(form.get('visual_prompt')||'')).run();return Response.redirect(new URL('/project/'+id,req.url),303)}
 
 async function createSceneVideo(req,env,u,projectId,sceneId){
-  if(!env['HF_'+'TOKEN']) return json({ok:false,error:'خدمة الفيديو غير مفعلة: Secret باسم HF_TOKEN غير متاح للـ Worker الحالي.'},503);
+  if(!env.HF_TOKEN) return json({ok:false,error:'خدمة الفيديو غير مفعلة: Secret باسم HF_TOKEN غير متاح للـ Worker الحالي.'},503);
   const scene=await env.DB.prepare('SELECT s.*,p.name project_name FROM scenes s JOIN projects p ON p.id=s.project_id WHERE s.id=? AND s.project_id=? AND p.user_id=?').bind(sceneId,projectId,u.id).first();
   if(!scene)return json({ok:false,error:'المشهد غير موجود أو لا تملك هذا المشروع.'},404);
   const b=await body(req); const ratio=b.aspect_ratio==='9:16'?'9:16':'16:9';
@@ -153,7 +153,7 @@ async function createSceneVideo(req,env,u,projectId,sceneId){
   ].join('\n');
   const videoId=uid(); await env.DB.prepare('INSERT INTO videos(id,project_id,scene_id,prompt,aspect_ratio,model,status) VALUES(?,?,?,?,?,?,?)').bind(videoId,projectId,sceneId,prompt,ratio,VIDEO_MODEL,'generating').run();
   try{
-    const client=new InferenceClient(env['HF_'+'TOKEN']);
+    const client=new InferenceClient(env.HF_TOKEN);
     const output=await client.textToVideo({model:VIDEO_MODEL,inputs:prompt,parameters:{num_frames:49,num_inference_steps:20,guidance_scale:5,negative_prompt:['text','subtitles','watermark','logo']},provider:'fal-ai'});
     if(!(output instanceof Blob)) throw new Error('محرك الفيديو أعاد نتيجة غير متوقعة.');
     if(output.size===0) throw new Error('محرك الفيديو أعاد ملفًا فارغًا.');
@@ -166,12 +166,12 @@ async function createSceneVideo(req,env,u,projectId,sceneId){
 export default {async fetch(req,env){
   const url=new URL(req.url); const path=url.pathname; const method=req.method;
   try{
-    if(path==='/health')return json({ok:true,service:'eldab3awy-ai',database:'eldab3awy-db',hf_token_configured:Boolean(env['HF_'+'TOKEN']),time:now()});
+    if(path==='/health')return json({ok:true,service:'eldab3awy-ai',database:'eldab3awy-db',hf_token_configured:Boolean(env.HF_TOKEN),time:now()});
     if(path==='/')return new Response(layout('الرئيسية',`<div class="card hero"><div class="mark" style="margin:0 auto 15px">ض</div><h1>الضبعاوي AI 🎬</h1><p class="muted">منصة عربية لتحويل فكرتك وسيناريوك إلى مشاهد وفيديو.</p><div class="actions" style="justify-content:center"><a class="btn primary" href="/register">ابدأ الآن</a><a class="btn ghost" href="/login">تسجيل الدخول</a></div></div><div class="grid"><div class="card"><h3>✍️ السيناريو</h3><p class="muted">احفظ السيناريو بنسخ متتابعة بدون فقدان العمل.</p></div><div class="card"><h3>🎬 المشاهد</h3><p class="muted">حوّل كل مشهد إلى وصف بصري جاهز للتوليد.</p></div><div class="card"><h3>⬇️ الفيديو</h3><p class="muted">ولّد فيديو المشهد ثم حمّله مباشرة على الموبايل.</p></div></div>`),{headers:{'content-type':'text/html; charset=utf-8'}});
-    if(path==='/register'&&method==='GET')return authPage(req,env,'register');
-    if(path==='/register'&&method==='POST')return register(req,env);
-    if(path==='/login'&&method==='GET')return authPage(req,env,'login');
+    if(path==='/login'&&method==='GET')return loginPage();
     if(path==='/login'&&method==='POST')return login(req,env);
+    if(path==='/register'&&method==='GET')return registerPage();
+    if(path==='/register'&&method==='POST')return register(req,env);
     if(path==='/logout'&&method==='POST')return logout(req,env);
     const u=await currentUser(req,env); if(!u)return Response.redirect(new URL('/login',req.url),303);
     if(path==='/dashboard')return dashboard(req,env,u);
