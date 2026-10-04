@@ -1,12 +1,8 @@
 {
   "name": "eldab3awy-ai",
   "main": "worker.js",
-  "compatibility_date": "2026-10-04",
+  "compatibility_date": "2026-09-27",
   "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "eldab3awy-db",
-      "database_id": "d53d53ef-0499-4000-9f4a-b7a692b73477"
-    }
+    {"binding":"DB","database_name":"eldab3awy-db","database_id":"d53d53ef-0499-4000-9f4a-b7a692b73477"}
   ]
 }

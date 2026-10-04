@@ -1,214 +1,189 @@
-import { InferenceClient } from '@huggingface/inference';
+import { InferenceClient } from "@huggingface/inference";
 
-const COOKIE = 'eldab3awy_session';
-const SESSION_DAYS = 30;
-const ADMIN_EMAIL = 'mmalsakr8@gmail.com';
-const VIDEO_MODEL = 'Wan-AI/Wan2.1-T2V-1.3B';
-const enc = new TextEncoder();
+const COOKIE='eldab3awy_session';
+const SESSION_DAYS=30;
+const enc=new TextEncoder();
+const dec=new TextDecoder();
 
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const uid = () => crypto.randomUUID();
-const now = () => new Date().toISOString();
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const uid=()=>crypto.randomUUID();
+const json=(data,status=200,headers={})=>new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json; charset=utf-8',...headers}});
+const redirect=(url,headers={})=>new Response(null,{status:302,headers:{Location:url,...headers}});
+const now=()=>new Date().toISOString();
+let schemaReady=false;
+async function ensureSchema(env){
+  if(schemaReady)return;
+  const stmts=[
+    `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY,name TEXT NOT NULL,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,role TEXT NOT NULL DEFAULT 'user')`,
+    `CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,expires_at TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+    `CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,title TEXT NOT NULL,idea TEXT,genre TEXT,tone TEXT,language TEXT,status TEXT NOT NULL DEFAULT 'draft',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT)`,
+    `CREATE TABLE IF NOT EXISTS scripts (id TEXT PRIMARY KEY,project_id TEXT NOT NULL,content TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1,updated_at TEXT)`,
+    `CREATE TABLE IF NOT EXISTS characters (id TEXT PRIMARY KEY,project_id TEXT NOT NULL,name TEXT NOT NULL,role TEXT,description TEXT,traits TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+    `CREATE TABLE IF NOT EXISTS scenes (id TEXT PRIMARY KEY,project_id TEXT NOT NULL,scene_number INTEGER NOT NULL,title TEXT,location TEXT,time_of_day TEXT,description TEXT,dialogue TEXT,visual_prompt TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+    `CREATE TABLE IF NOT EXISTS videos (id TEXT PRIMARY KEY,project_id TEXT NOT NULL,scene_id TEXT NOT NULL,prompt TEXT NOT NULL,aspect_ratio TEXT NOT NULL DEFAULT '16:9',status TEXT NOT NULL DEFAULT 'completed',model TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+    `CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_scripts_project ON scripts(project_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_characters_project ON characters(project_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_scenes_project ON scenes(project_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_videos_scene ON videos(scene_id)`
+  ];
+  for(const sql of stmts){try{await env.DB.prepare(sql).run()}catch(e){/* existing/incompatible objects are handled below */}}
+  const migrations=[
+    `ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'`,
+    `ALTER TABLE scripts ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE scripts ADD COLUMN updated_at TEXT`,
+    `ALTER TABLE projects ADD COLUMN genre TEXT`,
+    `ALTER TABLE projects ADD COLUMN tone TEXT`,
+    `ALTER TABLE projects ADD COLUMN language TEXT`,
+    `ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'`,
+    `ALTER TABLE projects ADD COLUMN created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP`,
+    `ALTER TABLE projects ADD COLUMN updated_at TEXT`,
+    `ALTER TABLE scenes ADD COLUMN visual_prompt TEXT`,
+    `ALTER TABLE scenes ADD COLUMN dialogue TEXT`,
+    `ALTER TABLE scenes ADD COLUMN time_of_day TEXT`,
+    `ALTER TABLE scenes ADD COLUMN location TEXT`,
+    `ALTER TABLE scenes ADD COLUMN description TEXT`,
+    `ALTER TABLE scenes ADD COLUMN title TEXT`,
+    `ALTER TABLE scenes ADD COLUMN scene_number INTEGER NOT NULL DEFAULT 1`
+  ];
+  for(const sql of migrations){try{await env.DB.prepare(sql).run()}catch(e){}}
+  try{await env.DB.prepare(`UPDATE users SET role='admin' WHERE lower(email)=?`).bind('mmalsakr8@gmail.com').run()}catch(e){}
+  schemaReady=true;
+}
 
-async function sha256(s){
-  const b = await crypto.subtle.digest('SHA-256', enc.encode(s));
-  return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');
-}
-async function hashPassword(password){
-  const salt = uid();
-  const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({name:'PBKDF2',salt:enc.encode(salt),iterations:120000,hash:'SHA-256'}, key, 256);
-  return salt + '$' + [...new Uint8Array(bits)].map(x=>x.toString(16).padStart(2,'0')).join('');
-}
-async function verifyPassword(password, stored){
-  const raw=String(stored||'');
-  if(!raw) return false;
-  // Current format: randomSalt$PBKDF2-SHA256-hex
-  const parts=raw.split('$');
-  if(parts.length===2 && parts[0] && /^[0-9a-f]+$/i.test(parts[1])){
-    const salt=parts[0], wanted=parts[1].toLowerCase();
-    const key=await crypto.subtle.importKey('raw',enc.encode(password),'PBKDF2',false,['deriveBits']);
-    const bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt:enc.encode(salt),iterations:120000,hash:'SHA-256'},key,256);
-    const got=[...new Uint8Array(bits)].map(x=>x.toString(16).padStart(2,'0')).join('');
-    return got===wanted;
-  }
-  // Legacy format fallback: plain SHA-256 hex hash.
-  if(/^[0-9a-f]{64}$/i.test(raw)) return (await sha256(password))===raw.toLowerCase();
-  return false;
-}
-function json(data,status=200,headers={}){
-  return new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store',...headers}});
-}
-function cookie(name,value,maxAge){
-  return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
-}
-function clearCookie(){ return `${COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`; }
-async function body(req){ try{return await req.json()}catch{return {}} }
-
+async function sha(s){const b=await crypto.subtle.digest('SHA-256',enc.encode(s));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')}
+function cookies(req){const o={};(req.headers.get('Cookie')||'').split(';').forEach(p=>{const i=p.indexOf('=');if(i>0)o[p.slice(0,i).trim()]=decodeURIComponent(p.slice(i+1).trim())});return o}
+function setCookie(token,maxAge=SESSION_DAYS*86400){return `${COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`}
+function clearCookie(){return `${COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`}
 async function currentUser(req,env){
-  const raw = req.headers.get('Cookie') || '';
-  const m = raw.match(new RegExp('(?:^|;\\s*)'+COOKIE+'=([^;]+)'));
-  if(!m) return null;
-  const token = decodeURIComponent(m[1]);
-  const th = await sha256(token);
-  return await env.DB.prepare(`SELECT u.id,u.name,u.email FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?`).bind(th,now()).first();
-}
-
-function layout(title,content,user=null){
-  return `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>${esc(title)} — الضبعاوي AI</title><style>
-  :root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Tahoma,Arial,sans-serif;background:#07111f;color:#edf4ff}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#142b46 0,#07111f 48%,#040914 100%);min-height:100vh}a{text-decoration:none;color:inherit}.wrap{max-width:1100px;margin:auto;padding:18px}.nav{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0}.brand{display:flex;align-items:center;gap:10px;font-weight:900}.mark{width:42px;height:42px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(135deg,#ffd166,#ef476f);color:#111;font-size:22px;box-shadow:0 8px 25px #0005}.brand small{display:block;color:#9fb1c8;font-weight:500}.card{background:#0c1a2bde;border:1px solid #ffffff14;border-radius:22px;padding:22px;box-shadow:0 18px 60px #0004;margin:14px 0}.hero{padding:45px 25px;text-align:center}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}.field{display:flex;flex-direction:column;gap:7px;margin:12px 0}.field label{font-weight:700}.field input,.field textarea,.field select{width:100%;background:#071321;color:#fff;border:1px solid #ffffff18;border-radius:13px;padding:12px;font:inherit;outline:none}.field textarea{min-height:180px;resize:vertical}.btn{border:0;border-radius:13px;padding:12px 18px;font:inherit;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px}.primary{background:linear-gradient(135deg,#ffd166,#ff8c42);color:#161616}.ghost{background:#ffffff10;color:#fff;border:1px solid #ffffff18}.danger{background:#ff4d6d;color:#fff}.muted{color:#9fb1c8}.ok{color:#65e6a2}.err{color:#ff8095}.actions{display:flex;flex-wrap:wrap;gap:10px}.scene{border:1px solid #ffffff14;border-radius:18px;padding:17px;margin-top:15px;background:#071321}.videoBox{margin-top:12px}.videoBox video{width:100%;max-height:520px;border-radius:16px;background:#000}.status{padding:10px 0;min-height:22px}.badge{display:inline-block;padding:5px 10px;border-radius:999px;background:#ffffff10;color:#bcd0e6;font-size:13px}.footer{text-align:center;color:#8294aa;padding:35px 10px;font-size:13px}h1,h2,h3{margin-top:0}code{direction:ltr;display:inline-block}.topline{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}@media(max-width:600px){.hero{padding:30px 14px}.card{padding:17px}.actions .btn{width:100%}}
-  </style></head><body><div class="wrap"><nav class="nav"><a class="brand" href="/"><span class="mark">ض</span><span>الضبعاوي AI<small>من الفكرة إلى الفيلم</small></span></a>${user?`<div class="actions"><a class="btn ghost" href="/dashboard">لوحة التحكم</a><form method="post" action="/logout"><button class="btn ghost">خروج</button></form></div>`:''}</nav>${content}<div class="footer">جميع الحقوق محفوظة بواسطة M/ Mohamed Abdalazim</div></div></body></html>`;
-}
-
-function authResponse(title,content){
-  return new Response(layout(title,content),{status:200,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store, no-cache, must-revalidate, max-age=0','pragma':'no-cache'}});
-}
-function loginPage(error=''){
-  const errorBox=error?`<div class="card" style="border-color:#ff809555;background:#3a1220"><strong class="err">${esc(error)}</strong></div>`:'';
-  return authResponse('تسجيل الدخول',`${errorBox}<div class="card" style="max-width:520px;margin:45px auto"><h1>تسجيل الدخول</h1><p class="muted">أدخل بيانات حسابك للمتابعة إلى مشروعك.</p><form method="post" action="/login" autocomplete="on"><div class="field"><label>البريد الإلكتروني</label><input type="email" name="email" required maxlength="160" autocomplete="email" placeholder="name@example.com"></div><div class="field"><label>كلمة المرور</label><input type="password" name="password" required minlength="8" maxlength="128" autocomplete="current-password" placeholder="أدخل كلمة المرور"></div><button class="btn primary" type="submit" style="width:100%">دخول</button></form><p class="muted" style="margin-bottom:0;text-align:center">ليس لديك حساب؟ <a href="/register">إنشاء حساب جديد</a></p></div>`);
-}
-function registerPage(error=''){
-  const errorBox=error?`<div class="card" style="border-color:#ff809555;background:#3a1220"><strong class="err">${esc(error)}</strong></div>`:'';
-  return authResponse('إنشاء حساب جديد',`${errorBox}<div class="card" style="max-width:520px;margin:45px auto"><h1>إنشاء حساب جديد</h1><p class="muted">أنشئ حسابك مرة واحدة وابدأ مشروعك السينمائي مباشرة.</p><form method="post" action="/register" autocomplete="on"><div class="field"><label>الاسم</label><input name="name" required maxlength="80" autocomplete="name" placeholder="اكتب اسمك"></div><div class="field"><label>البريد الإلكتروني</label><input type="email" name="email" required maxlength="160" autocomplete="email" placeholder="name@example.com"></div><div class="field"><label>كلمة المرور</label><input type="password" name="password" required minlength="8" maxlength="128" autocomplete="new-password" placeholder="8 أحرف على الأقل"></div><button class="btn primary" type="submit" style="width:100%">إنشاء الحساب والبدء</button></form><p class="muted" style="margin-bottom:0;text-align:center">لديك حساب بالفعل؟ <a href="/login">تسجيل الدخول</a></p></div>`);
-}
-
-async function register(req,env){
+  const raw=cookies(req)[COOKIE];
+  if(!raw)return null;
   try{
-    const form=await req.formData();
-    const name=String(form.get('name')||'').trim();
-    const email=String(form.get('email')||'').trim().toLowerCase();
-    const password=String(form.get('password')||'');
-    if(name.length<2)return registerPage('اكتب اسمًا صحيحًا.');
-    if(!email)return registerPage('اكتب البريد الإلكتروني.');
-    if(password.length<8)return registerPage('كلمة المرور يجب أن تكون 8 أحرف على الأقل.');
-    const exists=await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
-    if(exists)return registerPage('هذا البريد الإلكتروني مستخدم بالفعل. يمكنك تسجيل الدخول بدلًا من إنشاء حساب جديد.');
-    const role=email===ADMIN_EMAIL?'admin':'user';
-    const id=uid();
-    const ph=await hashPassword(password);
-    await env.DB.prepare('INSERT INTO users(id,name,email,password_hash,role) VALUES(?,?,?,?,?)').bind(id,name,email,ph,role).run();
-    const token=crypto.randomUUID()+'-'+crypto.randomUUID();
-    const th=await sha256(token);
-    const expires=new Date(Date.now()+SESSION_DAYS*86400000).toISOString();
-    await env.DB.prepare('INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?,?,?,?)').bind(uid(),id,th,expires).run();
-    return new Response(null,{status:303,headers:{Location:'/dashboard','Set-Cookie':cookie(COOKIE,token,SESSION_DAYS*86400)}});
-  }catch(e){
-    return registerPage('تعذر إنشاء الحساب حاليًا. تأكد أن قاعدة البيانات جاهزة ثم حاول مرة أخرى.');
-  }
+    const h=await sha(raw);
+    try{
+      return await env.DB.prepare(`SELECT u.id,u.name,u.email,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?`).bind(h,now()).first();
+    }catch(e){
+      return await env.DB.prepare(`SELECT u.id,u.name,u.email,'user' AS role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?`).bind(h,now()).first();
+    }
+  }catch(e){ return null; }
+}
+async function createSession(userId,env){const raw=crypto.randomUUID()+'-'+crypto.randomUUID();const expires=new Date(Date.now()+SESSION_DAYS*86400*1000).toISOString();await env.DB.prepare('DELETE FROM sessions WHERE expires_at<=?').bind(now()).run();await env.DB.prepare('INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?,?,?,?)').bind(uid(),userId,await sha(raw),expires).run();return raw}
+async function body(req){try{return await req.json()}catch{return {}}}
+function isApi(req){return new URL(req.url).pathname.startsWith('/api/')}
+function page(title,content,user=null){return `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0b1020"><title>${esc(title)} — الضبعاوي AI</title><style>
+:root{--bg:#080c18;--panel:#10182b;--panel2:#141f36;--text:#f8fafc;--muted:#9aa7bd;--line:#25324b;--gold:#f59e0b;--red:#ef4444;--ok:#22c55e}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 10% 0,#17213b 0,transparent 35%),var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Tahoma,Arial,sans-serif;min-height:100vh}a{color:inherit;text-decoration:none}.wrap{max-width:1180px;margin:auto;padding:20px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:8px 0 22px}.brand{display:flex;align-items:center;gap:10px;font-weight:900;font-size:21px}.mark{width:42px;height:42px;border-radius:13px;background:linear-gradient(135deg,var(--gold),var(--red));display:grid;place-items:center;color:#111827;font-weight:1000}.ai{color:#fbbf24}.nav{display:flex;gap:8px;flex-wrap:wrap}.nav a,.btn{border:1px solid var(--line);background:#111a2d;color:var(--text);padding:10px 14px;border-radius:11px;cursor:pointer;font-weight:700}.nav a:hover,.btn:hover{border-color:#51617f}.btn.primary{border:0;background:linear-gradient(135deg,#f59e0b,#ef4444);color:#111827}.btn.danger{background:#351722;border-color:#6f2a3a}.hero{padding:46px 0 30px}.hero h1{font-size:clamp(34px,7vw,66px);line-height:1.02;margin:12px 0}.hero p{max-width:760px;color:var(--muted);font-size:18px;line-height:1.9}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}.card{background:rgba(16,24,43,.9);border:1px solid var(--line);border-radius:18px;padding:20px}.card h3{margin:0 0 8px}.muted{color:var(--muted)}.small{font-size:13px}.form{max-width:720px;margin:30px auto}.label{display:block;margin:14px 0 7px;font-weight:800}.input,.select,.textarea{width:100%;border:1px solid var(--line);background:#0c1324;color:var(--text);border-radius:12px;padding:12px 13px;font:inherit;outline:none}.input:focus,.select:focus,.textarea:focus{border-color:var(--gold)}.textarea{min-height:170px;resize:vertical}.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:18px}.alert{padding:12px 14px;border-radius:12px;background:#3a1720;border:1px solid #702b3a;color:#fecaca;margin:15px 0}.success{background:#102d21;border-color:#235b42;color:#bbf7d0}.stat{font-size:30px;font-weight:900}.list{display:grid;gap:12px}.project{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px;border:1px solid var(--line);border-radius:14px;background:#0d1526}.project .info{min-width:0}.project h3{margin:0 0 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.badge{display:inline-block;padding:4px 8px;border-radius:999px;background:#202b42;color:#cbd5e1;font-size:12px}.tabs{display:flex;gap:8px;overflow:auto;padding-bottom:4px}.tabs a{padding:9px 12px;border:1px solid var(--line);border-radius:10px}.footer{border-top:1px solid var(--line);margin-top:45px;padding:22px 0;color:var(--muted);font-size:13px;text-align:center}.two{grid-template-columns:280px 1fr}.item{border:1px solid var(--line);padding:14px;border-radius:13px;background:#0d1526}.item h4{margin:0 0 5px}.empty{text-align:center;padding:45px 15px;color:var(--muted)}@media(max-width:800px){.grid,.grid2,.two{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}.project{align-items:flex-start;flex-direction:column}.hero{padding-top:25px}}
+</style></head><body><div class="wrap"><header class="top"><a class="brand" href="/"><span class="mark">ض</span><span>الضبعاوي <span class="ai">AI</span></span></a><nav class="nav">${user?`<a href="/dashboard">لوحة التحكم</a><a href="/project/new">+ مشروع</a><a href="/logout">خروج</a>`:`<a href="/login">دخول</a><a class="btn primary" href="/register">ابدأ الآن</a>`}</nav></header>${content}<footer class="footer">© 2026 الضبعاوي AI — منصة صناعة المحتوى والمشاريع بالذكاء الاصطناعي</footer></div></body></html>`}
+function home(user){return page('الرئيسية',`<section class="hero"><span class="badge">من الفكرة إلى المشروع 🎬</span><h1>اصنع فكرتك.<br><span class="ai">طوّرها بالـ AI.</span></h1><p>الضبعاوي AI مساحة عربية لتنظيم أفكار المحتوى، بناء المشاريع، كتابة السيناريو، الشخصيات والمشاهد في مكان واحد. الأساس محفوظ وقابل للتوسع.</p><div class="actions"><a class="btn primary" href="${user?'/dashboard':'/register'}">${user?'اذهب إلى مشاريعي':'ابدأ مشروعك الآن'}</a>${!user?'<a class="btn" href="/login">لدي حساب بالفعل</a>':''}</div></section><section class="grid"><div class="card"><h3>💡 فكرة</h3><p class="muted">احفظ الفكرة الأساسية والنوع والنبرة واللغة لكل مشروع.</p></div><div class="card"><h3>📝 سيناريو</h3><p class="muted">محرر طويل لحفظ السيناريو وتطويره بدون فقدان عملك.</p></div><div class="card"><h3>🎞️ مشاهد وشخصيات</h3><p class="muted">نظّم الشخصيات والمشاهد والوصف البصري والحوار.</p></div></section>` ,user)}
+function authPage(type,error=''){const reg=type==='register';return page(reg?'إنشاء حساب':'دخول',`<div class="card form"><h1>${reg?'إنشاء حساب جديد':'تسجيل الدخول'}</h1><p class="muted">${reg?'أنشئ حسابك وابدأ أول مشروع.':'أدخل بيانات حسابك للمتابعة.'}</p>${error?`<div class="alert">${esc(error)}</div>`:''}<form method="post" action="/${reg?'register':'login'}">${reg?'<label class="label">الاسم</label><input class="input" name="name" required maxlength="80" autocomplete="name">':''}<label class="label">البريد الإلكتروني</label><input class="input" type="email" name="email" required maxlength="160" autocomplete="email"><label class="label">كلمة المرور</label><input class="input" type="password" name="password" required minlength="8" maxlength="128" autocomplete="${reg?'new-password':'current-password'}"><div class="actions"><button class="btn primary" type="submit">${reg?'إنشاء الحساب':'دخول'}</button><a class="btn" href="/${reg?'login':'register'}">${reg?'لدي حساب':'إنشاء حساب'}</a></div></form></div>`)}
+function dashboard(user,projects){return page('لوحة التحكم',`<section><div class="card"><div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap"><div><h1 style="margin:0 0 7px">مرحبًا ${esc(user.name)} 👋</h1><p class="muted" style="margin:0">${esc(user.email)}</p></div><a class="btn primary" href="/project/new">+ إنشاء مشروع</a></div></div><div class="grid" style="margin:16px 0"><div class="card"><div class="muted">مشاريعي</div><div class="stat">${projects.length}</div></div><div class="card"><div class="muted">الحالة</div><div class="stat">جاهز</div></div><div class="card"><div class="muted">المرحلة</div><div class="stat">1</div></div></div><div class="card"><h2>مشاريعك</h2>${projects.length?`<div class="list">${projects.map(p=>`<div class="project"><div class="info"><h3>${esc(p.title)}</h3><div class="muted small">${esc(p.genre||'بدون نوع')} · ${esc(p.tone||'بدون نبرة')} · <span class="badge">${esc(statusName(p.status))}</span></div></div><div class="actions" style="margin:0"><a class="btn" href="/project/${p.id}">فتح المشروع</a></div></div>`).join('')}</div>`:'<div class="empty">لسه مفيش مشاريع. ابدأ بأول فكرة ليك.</div>'}</div></section>`,user)}
+const statusName=s=>({draft:'مسودة',planning:'تخطيط',script:'سيناريو',production:'إنتاج',done:'مكتمل'}[s]||'مسودة');
+function projectPage(user,p,script,chars,scenes,videos){
+  const videoMap={};
+  for(const v of videos||[])if(!videoMap[v.scene_id])videoMap[v.scene_id]=v;
+  return page(p.title,`
+<div class="card"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap"><div><span class="badge">${esc(statusName(p.status))}</span><h1 style="margin:10px 0 5px">${esc(p.title)}</h1><p class="muted">آخر تحديث: ${esc(p.updated_at||'')}</p></div><div class="actions"><a class="btn" href="/dashboard">رجوع</a><form method="post" action="/project/${p.id}/delete" onsubmit="return confirm('حذف المشروع نهائيًا؟')"><button class="btn danger" type="submit">حذف</button></form></div></div></div>
+<div class="tabs" style="margin:16px 0"><a href="#overview">📌 البيانات</a><a href="#script">📝 السيناريو</a><a href="#characters">🎭 الشخصيات</a><a href="#scenes">🎞️ المشاهد</a></div>
+<section id="overview" class="card"><h2>بيانات المشروع</h2><form method="post" action="/project/${p.id}/save"><div class="grid2"><div><label class="label">اسم المشروع</label><input class="input" name="title" value="${esc(p.title)}" required maxlength="160"><label class="label">نوع المحتوى</label><input class="input" name="genre" value="${esc(p.genre||'')}" placeholder="فيلم، إعلان، قصة..."></div><div><label class="label">النبرة</label><input class="input" name="tone" value="${esc(p.tone||'')}" placeholder="درامي، كوميدي، مشوق..."><label class="label">اللغة</label><input class="input" name="language" value="${esc(p.language||'')}" placeholder="العربية"></div></div><label class="label">الفكرة الأساسية</label><textarea class="textarea" name="idea" style="min-height:130px" placeholder="اكتب الفكرة بالتفصيل...">${esc(p.idea||'')}</textarea><label class="label">الحالة</label><select class="select" name="status">${['draft','planning','script','production','done'].map(s=>`<option value="${s}" ${p.status===s?'selected':''}>${statusName(s)}</option>`).join('')}</select><div class="actions"><button class="btn primary">حفظ بيانات المشروع</button></div></form></section>
+<section id="script" class="card" style="margin-top:16px"><h2>📝 السيناريو</h2><p class="muted">اكتب السيناريو كاملًا وسيتم حفظه في قاعدة البيانات.</p><form method="post" action="/project/${p.id}/script"><textarea class="textarea" name="content" style="min-height:430px" placeholder="المشهد 1...\nالمكان...\nالحوار...">${esc(script?.content||'')}</textarea><div class="actions"><button class="btn primary">حفظ السيناريو</button></div></form></section>
+<section id="characters" class="card" style="margin-top:16px"><h2>🎭 الشخصيات</h2><form method="post" action="/project/${p.id}/characters/add"><div class="grid2"><div><label class="label">اسم الشخصية</label><input class="input" name="name" required><label class="label">الدور</label><input class="input" name="role" placeholder="بطل، خصم، مساعد..."></div><div><label class="label">الصفات</label><input class="input" name="traits" placeholder="هادئ، ذكي..."><label class="label">الوصف</label><input class="input" name="description"></div></div><div class="actions"><button class="btn primary">إضافة شخصية</button></div></form><div class="list" style="margin-top:14px">${chars.length?chars.map(c=>`<div class="item"><h4>${esc(c.name)} <span class="badge">${esc(c.role||'')}</span></h4><div class="muted small">${esc(c.description||'')} ${c.traits?'· '+esc(c.traits):''}</div><form method="post" action="/project/${p.id}/characters/${c.id}/delete" style="margin-top:9px"><button class="btn danger" type="submit">حذف</button></form></div>`).join(''):'<div class="empty">أضف أول شخصية للمشروع.</div>'}</div></section>
+<section id="scenes" class="card" style="margin-top:16px"><h2>🎞️ المشاهد</h2><p class="muted">كل مشهد يمكن تحويله الآن إلى فيديو تجريبي بالذكاء الاصطناعي.</p><form method="post" action="/project/${p.id}/scenes/add"><div class="grid2"><div><label class="label">رقم المشهد</label><input class="input" type="number" name="scene_number" min="1" value="${scenes.length?Math.max(...scenes.map(x=>Number(x.scene_number)||0))+1:1}" required><label class="label">عنوان المشهد</label><input class="input" name="title"></div><div><label class="label">المكان</label><input class="input" name="location"><label class="label">الوقت</label><input class="input" name="time_of_day" placeholder="ليل / نهار"></div></div><label class="label">الوصف</label><textarea class="textarea" name="description" style="min-height:110px"></textarea><label class="label">الحوار</label><textarea class="textarea" name="dialogue" style="min-height:110px"></textarea><label class="label">Visual Prompt</label><textarea class="textarea" name="visual_prompt" style="min-height:100px" placeholder="وصف بصري واضح للمشهد والحركة والإضاءة والكاميرا..."></textarea><div class="actions"><button class="btn primary">إضافة المشهد</button></div></form><div class="list" style="margin-top:14px">${scenes.length?scenes.map(s=>{
+    const v=videoMap[s.id];
+    return `<div class="item" id="scene-${s.id}"><h4>المشهد ${esc(s.scene_number)} — ${esc(s.title||'بدون عنوان')}</h4><div class="muted small">${esc(s.location||'')} ${s.time_of_day?'· '+esc(s.time_of_day):''}</div><p>${esc(s.description||'')}</p>${s.dialogue?`<details><summary>الحوار</summary><p>${esc(s.dialogue)}</p></details>`:''}${s.visual_prompt?`<details><summary>Visual Prompt</summary><p>${esc(s.visual_prompt)}</p></details>`:''}
+<div class="video-box"><h4 style="margin:0 0 8px">🎬 إنشاء فيديو للمشهد</h4><p class="muted small">سيتم استخدام الوصف البصري + المكان + الوقت + الحركة والحوار لبناء Prompt للفيديو.</p><div class="grid2"><div><label class="label">نسبة الفيديو</label><select class="select" id="ratio-${s.id}"><option value="16:9">16:9 — أفقي</option><option value="9:16">9:16 — رأسي</option></select></div><div><label class="label">مدة الاختبار</label><div class="input" style="opacity:.8">مقطع قصير للتجربة</div></div></div><div class="actions"><button type="button" class="btn primary" onclick="createSceneVideo('${p.id}','${s.id}')">🎬 إنشاء فيديو</button><span id="video-status-${s.id}" class="muted small"></span></div>${v?`<div class="success small" style="margin-top:10px">آخر عملية توليد: ${esc(v.created_at||'')} · ${esc(v.aspect_ratio||'16:9')} · ${esc(v.model||'')}</div>`:''}<video id="video-${s.id}" controls playsinline preload="metadata" style="display:none;width:100%;max-height:520px;margin-top:12px;border-radius:14px;background:#000"></video></div>
+<form method="post" action="/project/${p.id}/scenes/${s.id}/delete" style="margin-top:12px"><button class="btn danger" type="submit">حذف المشهد</button></form></div>`}).join(''):'<div class="empty">أضف أول مشهد للمشروع.</div>'}</div></section>
+<script>
+async function createSceneVideo(projectId,sceneId){
+ const btn=event&&event.target?event.target:null, status=document.getElementById('video-status-'+sceneId), video=document.getElementById('video-'+sceneId), ratio=document.getElementById('ratio-'+sceneId).value;
+ if(btn){btn.disabled=true;btn.dataset.old=btn.textContent;btn.textContent='⏳ جاري إنشاء الفيديو...'}
+ status.textContent='جاري إرسال المشهد إلى محرك الفيديو...'; video.style.display='none'; video.removeAttribute('src');
+ try{
+  const r=await fetch('/project/'+encodeURIComponent(projectId)+'/scenes/'+encodeURIComponent(sceneId)+'/video',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({aspect_ratio:ratio})});
+  if(!r.ok){let msg='تعذر إنشاء الفيديو';try{const d=await r.json();msg=d.error||d.detail||msg}catch{}throw new Error(msg)}
+  const blob=await r.blob();
+  const url=URL.createObjectURL(blob);video.src=url;video.style.display='block';status.textContent='✅ تم إنشاء الفيديو بنجاح';
+  video.onloadeddata=()=>{try{video.scrollIntoView({behavior:'smooth',block:'center'})}catch{}};
+ }catch(e){status.textContent='❌ '+(e.message||'حدث خطأ أثناء التوليد')}
+ finally{if(btn){btn.disabled=false;btn.textContent=btn.dataset.old||'🎬 إنشاء فيديو'}}
+}
+</script>`,user)
 }
 
-async function login(req,env){
-  try{
-    const form=await req.formData();
-    const email=String(form.get('email')||'').trim().toLowerCase();
-    const password=String(form.get('password')||'');
-    if(!email || !password) return loginPage('اكتب البريد الإلكتروني وكلمة المرور.');
-    const u=await env.DB.prepare('SELECT id,name,email,password_hash FROM users WHERE lower(email)=? LIMIT 1').bind(email).first();
-    if(!u) return loginPage('البريد الإلكتروني أو كلمة المرور غير صحيحة.');
-    const valid=await verifyPassword(password,u.password_hash);
-    if(!valid) return loginPage('البريد الإلكتروني أو كلمة المرور غير صحيحة.');
-
-    const token=crypto.randomUUID()+'-'+crypto.randomUUID();
-    const th=await sha256(token);
-    const expires=new Date(Date.now()+SESSION_DAYS*86400000).toISOString();
-    await env.DB.prepare('INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?,?,?,?)')
-      .bind(uid(),u.id,th,expires).run();
-
-    return new Response(null,{status:303,headers:{
-      'Location':'/dashboard',
-      'Set-Cookie':cookie(COOKIE,token,SESSION_DAYS*86400),
-      'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0',
-      'Pragma':'no-cache'
-    }});
-  }catch(e){
-    return loginPage('تعذر تسجيل الدخول حاليًا. إذا كانت بياناتك صحيحة جرّب مرة أخرى.');
-  }
+async function projectData(env,id,userId){
+  const p=await env.DB.prepare('SELECT * FROM projects WHERE id=? AND user_id=?').bind(id,userId).first();
+  if(!p)return null;
+  let script=null, chars=[], scenes=[], videos=[];
+  try{script=await env.DB.prepare('SELECT * FROM scripts WHERE project_id=?').bind(id).first()}catch(e){}
+  try{const r=await env.DB.prepare('SELECT * FROM characters WHERE project_id=? ORDER BY created_at').bind(id).all();chars=r.results||[]}catch(e){}
+  try{const r=await env.DB.prepare('SELECT * FROM scenes WHERE project_id=? ORDER BY scene_number').bind(id).all();scenes=r.results||[]}catch(e){}
+  try{const r=await env.DB.prepare('SELECT * FROM videos WHERE project_id=? ORDER BY created_at DESC').bind(id).all();videos=r.results||[]}catch(e){}
+  return {p,script,chars,scenes,videos}
 }
 
-async function logout(req,env){
-  const raw=req.headers.get('Cookie')||''; const m=raw.match(new RegExp('(?:^|;\\s*)'+COOKIE+'=([^;]+)')); if(m){const th=await sha256(decodeURIComponent(m[1])); await env.DB.prepare('DELETE FROM sessions WHERE token_hash=?').bind(th).run().catch(()=>{});} return new Response(null,{status:303,headers:{Location:'/','Set-Cookie':clearCookie()}});
-}
-
-async function dashboard(req,env,u){
-  const ps=await env.DB.prepare('SELECT * FROM projects WHERE user_id=? ORDER BY updated_at DESC').bind(u.id).all();
-  const rows=(ps.results||[]).map(p=>`<div class="card"><div class="topline"><div><h3>${esc(p.name)}</h3><div class="muted">${esc(p.genre||'')} · ${esc(p.tone||'')}</div></div><span class="badge">${esc(p.status)}</span></div><p>${esc(p.idea)}</p><div class="actions"><a class="btn primary" href="/project/${encodeURIComponent(p.id)}">فتح المشروع</a></div></div>`).join('');
-  return new Response(layout('لوحة التحكم',`<div class="card hero"><h1>مرحبًا ${esc(u.name)} 👋</h1><p class="muted">اكتب السيناريو، اصنع المشاهد، ثم ولّد الفيديو وحمّله على الموبايل.</p><a class="btn primary" href="/new-project">+ مشروع جديد</a></div><h2>مشاريعك</h2>${rows||'<div class="card"><p class="muted">لا توجد مشاريع حتى الآن.</p></div>'}` ,u),{headers:{'content-type':'text/html; charset=utf-8'}});
-}
-
-async function createProject(req,env,u){
-  const form=await req.formData(); const name=String(form.get('name')||'').trim(); const idea=String(form.get('idea')||'').trim(); const genre=String(form.get('genre')||'').trim(); const tone=String(form.get('tone')||'').trim();
-  if(!name)return new Response('اسم المشروع مطلوب',{status:400});
-  const id=uid(); await env.DB.prepare('INSERT INTO projects(id,user_id,name,idea,genre,tone) VALUES(?,?,?,?,?,?)').bind(id,u.id,name,idea,genre,tone).run();
-  await env.DB.prepare('INSERT INTO scenario_versions(id,project_id,version_no,content) VALUES(?,?,?,?)').bind(uid(),id,1,'').run();
-  return Response.redirect(new URL('/project/'+id,req.url),303);
-}
-
-async function projectPage(req,env,u,id){
-  const p=await env.DB.prepare('SELECT * FROM projects WHERE id=? AND user_id=?').bind(id,u.id).first(); if(!p)return new Response('المشروع غير موجود',{status:404});
-  const sc=await env.DB.prepare('SELECT * FROM scenes WHERE project_id=? ORDER BY scene_no').bind(id).all();
-  const version=await env.DB.prepare('SELECT * FROM scenario_versions WHERE project_id=? ORDER BY version_no DESC LIMIT 1').bind(id).first();
-  const scenes=(sc.results||[]).map(s=>`<div class="scene"><div class="topline"><h3>المشهد ${s.scene_no}: ${esc(s.title||'بدون عنوان')}</h3><span class="badge">${esc(s.location||'')}</span></div><p>${esc(s.description)}</p>${s.dialogue?`<p><b>الحوار:</b> ${esc(s.dialogue)}</p>`:''}<div class="field"><label>نسبة الفيديو</label><select id="ratio-${s.id}"><option>16:9</option><option>9:16</option></select></div><div class="actions"><button class="btn primary" type="button" onclick="createVideo('${p.id}','${s.id}',this)">🎬 إنشاء فيديو</button></div><div id="video-status-${s.id}" class="status muted"></div><div id="video-box-${s.id}" class="videoBox" style="display:none"><video id="video-${s.id}" controls playsinline></video><div class="actions" style="margin-top:10px"><a id="download-${s.id}" class="btn primary" download="eldab3awy-scene-${s.scene_no}.mp4">⬇️ تحميل الفيديو على الموبايل</a></div></div></div>`).join('');
-  return new Response(layout(p.name,`<div class="card"><div class="topline"><div><h1>${esc(p.name)}</h1><p class="muted">${esc(p.idea)}</p></div><span class="badge">${esc(p.genre||'فيلم')}</span></div><form method="post" action="/project/${id}/scenario"><div class="field"><label>السيناريو</label><textarea name="content" placeholder="اكتب السيناريو الكامل هنا...">${esc(version?.content||'')}</textarea></div><button class="btn primary">💾 حفظ نسخة جديدة</button></form></div><div class="card"><div class="topline"><h2>المشاهد والفيديو</h2><a class="btn ghost" href="/project/${id}/scene/new">+ إضافة مشهد</a></div>${scenes||'<p class="muted">أضف أول مشهد لتجربة توليد الفيديو.</p>'}</div><script>
-async function createVideo(projectId,sceneId,btn){const status=document.getElementById('video-status-'+sceneId),box=document.getElementById('video-box-'+sceneId),video=document.getElementById('video-'+sceneId),download=document.getElementById('download-'+sceneId),ratio=document.getElementById('ratio-'+sceneId).value;btn.disabled=true;const old=btn.textContent;btn.textContent='⏳ جاري إنشاء الفيديو...';status.textContent='يتم إرسال المشهد إلى محرك الفيديو. قد يستغرق الأمر وقتًا.';box.style.display='none';try{const r=await fetch('/project/'+encodeURIComponent(projectId)+'/scenes/'+encodeURIComponent(sceneId)+'/video',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({aspect_ratio:ratio})});if(!r.ok){let m='فشل إنشاء الفيديو';try{const d=await r.json();m=d.error||d.detail||m}catch{}throw new Error(m)}const blob=await r.blob();if(!blob.size)throw new Error('تم إنشاء رد فارغ من محرك الفيديو');const url=URL.createObjectURL(blob);video.src=url;download.href=url;box.style.display='block';status.textContent='✅ تم إنشاء الفيديو. اضغط «تحميل الفيديو على الموبايل» لحفظه.';video.scrollIntoView({behavior:'smooth',block:'center'})}catch(e){status.textContent='❌ '+(e.message||'حدث خطأ')}finally{btn.disabled=false;btn.textContent=old}}
-</script>` ,u),{headers:{'content-type':'text/html; charset=utf-8'}});
-}
-
-async function saveScenario(req,env,u,id){
-  const p=await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(id,u.id).first(); if(!p)return new Response('Not found',{status:404}); const form=await req.formData(); const content=String(form.get('content')||''); const last=await env.DB.prepare('SELECT COALESCE(MAX(version_no),0) n FROM scenario_versions WHERE project_id=?').bind(id).first(); const n=Number(last?.n||0)+1; await env.DB.prepare('INSERT INTO scenario_versions(id,project_id,version_no,content) VALUES(?,?,?,?)').bind(uid(),id,n,content).run(); await env.DB.prepare('UPDATE projects SET updated_at=? WHERE id=?').bind(now(),id).run(); return Response.redirect(new URL('/project/'+id,req.url),303);
-}
-
-async function addScenePage(req,env,u,id){const p=await env.DB.prepare('SELECT id,name FROM projects WHERE id=? AND user_id=?').bind(id,u.id).first();if(!p)return new Response('Not found',{status:404});return new Response(layout('إضافة مشهد',`<div class="card"><h1>إضافة مشهد إلى ${esc(p.name)}</h1><form method="post" action="/project/${id}/scene/new"><div class="grid"><div class="field"><label>عنوان المشهد</label><input name="title" required></div><div class="field"><label>المكان</label><input name="location"></div><div class="field"><label>الوقت</label><input name="time_of_day" placeholder="نهار / ليل"></div></div><div class="field"><label>الوصف</label><textarea name="description" required></textarea></div><div class="field"><label>الحوار</label><textarea name="dialogue"></textarea></div><div class="field"><label>التوجيه البصري</label><textarea name="visual_prompt" placeholder="الشخصيات، الحركة، الكاميرا، الإضاءة..."></textarea></div><button class="btn primary">حفظ المشهد</button></form></div>` ,u),{headers:{'content-type':'text/html; charset=utf-8'}})}
-
-async function addScene(req,env,u,id){const p=await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(id,u.id).first();if(!p)return new Response('Not found',{status:404});const form=await req.formData();const last=await env.DB.prepare('SELECT COALESCE(MAX(scene_no),0) n FROM scenes WHERE project_id=?').bind(id).first();const no=Number(last?.n||0)+1;await env.DB.prepare('INSERT INTO scenes(id,project_id,scene_no,title,location,time_of_day,description,dialogue,visual_prompt) VALUES(?,?,?,?,?,?,?,?,?)').bind(uid(),id,no,String(form.get('title')||''),String(form.get('location')||''),String(form.get('time_of_day')||''),String(form.get('description')||''),String(form.get('dialogue')||''),String(form.get('visual_prompt')||'')).run();return Response.redirect(new URL('/project/'+id,req.url),303)}
-
-async function createSceneVideo(req,env,u,projectId,sceneId){
-  if(!env.HF_TOKEN) return json({ok:false,error:'خدمة الفيديو غير مفعلة: Secret باسم HF_TOKEN غير متاح للـ Worker الحالي.'},503);
-  const scene=await env.DB.prepare('SELECT s.*,p.name project_name FROM scenes s JOIN projects p ON p.id=s.project_id WHERE s.id=? AND s.project_id=? AND p.user_id=?').bind(sceneId,projectId,u.id).first();
+async function createSceneVideo(req,env,projectId,sceneId,userId){
+  if(!env.HF_TOKEN)return json({ok:false,error:'خدمة الفيديو غير مفعلة بعد. أضف Secret باسم HF_TOKEN في Cloudflare.'},503);
+  const scene=await env.DB.prepare('SELECT s.* FROM scenes s JOIN projects p ON p.id=s.project_id WHERE s.id=? AND s.project_id=? AND p.user_id=?').bind(sceneId,projectId,userId).first();
   if(!scene)return json({ok:false,error:'المشهد غير موجود أو لا تملك هذا المشروع.'},404);
-  const b=await body(req); const ratio=b.aspect_ratio==='9:16'?'9:16':'16:9';
+  const b=await body(req);
+  const ratio=b.aspect_ratio==='9:16'?'9:16':'16:9';
   const prompt=[
-    'Create a short cinematic realistic video scene for an Arabic screenplay.',
+    'Create a short cinematic video scene for an Arabic screenplay.',
     `Aspect ratio composition: ${ratio}.`,
-    `Project: ${scene.project_name||''}.`,
     `Scene title: ${scene.title||'Untitled'}.`,
     `Location: ${scene.location||'unspecified'}.`,
     `Time: ${scene.time_of_day||'unspecified'}.`,
     `Description: ${scene.description||''}.`,
     `Dialogue/context: ${scene.dialogue||''}.`,
-    `Visual direction: ${scene.visual_prompt||''}.`,
-    'Natural character motion, coherent anatomy, cinematic camera movement, realistic lighting, detailed environment, no subtitles, no text, no logos, no watermark.'
+    `Visual prompt: ${scene.visual_prompt||''}.`,
+    'Cinematic realistic movement, coherent characters, natural camera motion, detailed lighting, no subtitles, no text overlays, no logos, no watermark.'
   ].join('\n');
-  const videoId=uid(); await env.DB.prepare('INSERT INTO videos(id,project_id,scene_id,prompt,aspect_ratio,model,status) VALUES(?,?,?,?,?,?,?)').bind(videoId,projectId,sceneId,prompt,ratio,VIDEO_MODEL,'generating').run();
+  const model='Wan-AI/Wan2.1-T2V-1.3B';
+  const videoId=uid();
   try{
+    await env.DB.prepare('INSERT INTO videos(id,project_id,scene_id,prompt,aspect_ratio,status,model) VALUES(?,?,?,?,?,?,?)').bind(videoId,projectId,sceneId,prompt,ratio,'generating',model).run();
     const client=new InferenceClient(env.HF_TOKEN);
-    const output=await client.textToVideo({model:VIDEO_MODEL,inputs:prompt,parameters:{num_frames:49,num_inference_steps:20,guidance_scale:5,negative_prompt:['text','subtitles','watermark','logo']},provider:'fal-ai'});
-    if(!(output instanceof Blob)) throw new Error('محرك الفيديو أعاد نتيجة غير متوقعة.');
-    if(output.size===0) throw new Error('محرك الفيديو أعاد ملفًا فارغًا.');
-    await env.DB.prepare('UPDATE videos SET status=?,mime_type=?,completed_at=? WHERE id=?').bind('completed',output.type||'video/mp4',now(),videoId).run();
-    const headers=new Headers({'content-type':output.type||'video/mp4','cache-control':'no-store','content-disposition':`attachment; filename="eldab3awy-${scene.scene_no}.mp4"`,'x-video-id':videoId});
-    return new Response(output,{status:200,headers});
-  }catch(e){const detail=String(e?.message||e);await env.DB.prepare('UPDATE videos SET status=?,error=? WHERE id=?').bind('failed',detail,videoId).run().catch(()=>{});return json({ok:false,error:'فشل إنشاء الفيديو.',detail},502)}
+    const output=await client.textToVideo({provider:'fal-ai',model,inputs:prompt,num_frames:49,num_inference_steps:20,guidance_scale:5});
+    await env.DB.prepare('UPDATE videos SET status=? WHERE id=?').bind('completed',videoId).run();
+    return new Response(output,{status:200,headers:{'content-type':'video/mp4','cache-control':'no-store','x-video-id':videoId}});
+  }catch(e){
+    try{await env.DB.prepare('UPDATE videos SET status=? WHERE id=?').bind('failed',videoId).run()}catch{}
+    return json({ok:false,error:'فشل إنشاء الفيديو.',detail:String(e?.message||e)},502);
+  }
 }
 
-export default {async fetch(req,env){
-  const url=new URL(req.url); const path=url.pathname; const method=req.method;
+
+export default {async fetch(req,env){try{await ensureSchema(env);const u=new URL(req.url),path=u.pathname,method=req.method;const user=await currentUser(req,env);
+if(path==='/health')return json({ok:true,service:'eldab3awy-ai',database:'eldab3awy-db',hf_token_configured:Boolean(env.HF_TOKEN),time:now()});
+if(path==='/favicon.svg')return new Response(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="16" fill="#f59e0b"/><text x="32" y="43" text-anchor="middle" font-size="34" font-weight="900" font-family="Arial">ض</text></svg>`,{headers:{'content-type':'image/svg+xml'}});
+if(path==='/api/me'){if(!user)return json({user:null});return json({user})}
+if(path==='/api/projects'){if(!user)return json({error:'غير مسجل'},401);const r=await env.DB.prepare('SELECT id,title,genre,tone,language,status,created_at,updated_at FROM projects WHERE user_id=? ORDER BY updated_at DESC').bind(user.id).all();return json({projects:r.results||[]})}
+if(path==='/' )return new Response(home(user),{headers:{'content-type':'text/html; charset=utf-8'}});
+if(path==='/register'&&method==='GET')return new Response(authPage('register'),{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store, no-cache, must-revalidate'}});
+if(path==='/login'&&method==='GET')return new Response(authPage('login'),{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store, no-cache, must-revalidate'}});
+if(path==='/logout'){if(user){const raw=cookies(req)[COOKIE];if(raw)await env.DB.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await sha(raw)).run()}return redirect('/',{'Set-Cookie':clearCookie()})}
+if((path==='/register'||path==='/login')&&method==='POST'){const form=await req.formData();const email=String(form.get('email')||'').trim().toLowerCase();const password=String(form.get('password')||'');if(!email||password.length<8)return new Response(authPage(path==='/register'?'register':'login','تأكد من البريد وكلمة المرور (8 أحرف على الأقل).'),{status:400,headers:{'content-type':'text/html; charset=utf-8'}});if(path==='/register'){const name=String(form.get('name')||'').trim();if(name.length<2)return new Response(authPage('register','اكتب اسمًا صحيحًا.'),{status:400,headers:{'content-type':'text/html; charset=utf-8'}});const exists=await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first();if(exists)return new Response(authPage('register','البريد الإلكتروني مستخدم بالفعل.'),{status:409,headers:{'content-type':'text/html; charset=utf-8'}});const id=uid();await env.DB.prepare('INSERT INTO users(id,name,email,password_hash) VALUES(?,?,?,?)').bind(id,name,email,await sha(password)).run();const token=await createSession(id,env);return redirect('/dashboard',{'Set-Cookie':setCookie(token)})}const found=await env.DB.prepare('SELECT * FROM users WHERE email=?').bind(email).first();if(!found||found.password_hash!==await sha(password))return new Response(authPage('login','البريد الإلكتروني أو كلمة المرور غير صحيحة.'),{status:401,headers:{'content-type':'text/html; charset=utf-8'}});const token=await createSession(found.id,env);return redirect('/dashboard',{'Set-Cookie':setCookie(token)})}
+if(path==='/dashboard'){
+  if(!user)return redirect('/login');
+  let rows=[];
   try{
-    if(path==='/health')return json({ok:true,service:'eldab3awy-ai',database:'eldab3awy-db',hf_token_configured:Boolean(env.HF_TOKEN),time:now()});
-    if(path==='/')return new Response(layout('الرئيسية',`<div class="card hero"><div class="mark" style="margin:0 auto 15px">ض</div><h1>الضبعاوي AI 🎬</h1><p class="muted">منصة عربية لتحويل فكرتك وسيناريوك إلى مشاهد وفيديو.</p><div class="actions" style="justify-content:center"><a class="btn primary" href="/register">ابدأ الآن</a><a class="btn ghost" href="/login">تسجيل الدخول</a></div></div><div class="grid"><div class="card"><h3>✍️ السيناريو</h3><p class="muted">احفظ السيناريو بنسخ متتابعة بدون فقدان العمل.</p></div><div class="card"><h3>🎬 المشاهد</h3><p class="muted">حوّل كل مشهد إلى وصف بصري جاهز للتوليد.</p></div><div class="card"><h3>⬇️ الفيديو</h3><p class="muted">ولّد فيديو المشهد ثم حمّله مباشرة على الموبايل.</p></div></div>`),{headers:{'content-type':'text/html; charset=utf-8'}});
-    if(path==='/login'&&method==='GET')return loginPage();
-    if(path==='/login'&&method==='POST')return login(req,env);
-    if(path==='/register'&&method==='GET')return registerPage();
-    if(path==='/register'&&method==='POST')return register(req,env);
-    if(path==='/logout'&&method==='POST')return logout(req,env);
-    const u=await currentUser(req,env); if(!u)return Response.redirect(new URL('/login',req.url),303);
-    if(path==='/dashboard')return dashboard(req,env,u);
-    if(path==='/new-project'&&method==='GET')return new Response(layout('مشروع جديد',`<div class="card"><h1>مشروع جديد</h1><form method="post" action="/new-project"><div class="field"><label>اسم المشروع</label><input name="name" required></div><div class="field"><label>الفكرة</label><textarea name="idea"></textarea></div><div class="grid"><div class="field"><label>النوع</label><input name="genre" placeholder="فيلم قصير"></div><div class="field"><label>النغمة</label><input name="tone" placeholder="درامي"></div></div><button class="btn primary">إنشاء المشروع</button></form></div>`,u),{headers:{'content-type':'text/html; charset=utf-8'}});
-    if(path==='/new-project'&&method==='POST')return createProject(req,env,u);
-    let m=path.match(/^\/project\/([^/]+)$/); if(m&&method==='GET')return projectPage(req,env,u,m[1]);
-    m=path.match(/^\/project\/([^/]+)\/scenario$/); if(m&&method==='POST')return saveScenario(req,env,u,m[1]);
-    m=path.match(/^\/project\/([^/]+)\/scene\/new$/); if(m&&method==='GET')return addScenePage(req,env,u,m[1]);
-    if(m&&method==='POST')return addScene(req,env,u,m[1]);
-    m=path.match(/^\/project\/([^/]+)\/scenes\/([^/]+)\/video$/); if(m&&method==='POST')return createSceneVideo(req,env,u,m[1],m[2]);
-    return new Response('Not Found',{status:404});
-  }catch(e){return json({ok:false,error:'خطأ داخلي',detail:String(e?.message||e)},500)}
-}};
+    const r=await env.DB.prepare('SELECT id,title,genre,tone,language,status,created_at,updated_at FROM projects WHERE user_id=? ORDER BY COALESCE(updated_at,created_at) DESC').bind(user.id).all();
+    rows=r.results||[];
+  }catch(e){
+    const r=await env.DB.prepare('SELECT id,title,idea FROM projects WHERE user_id=? ORDER BY id DESC').bind(user.id).all();
+    rows=(r.results||[]).map(x=>({...x,genre:'',tone:'',language:'العربية',status:'draft',created_at:'',updated_at:''}));
+  }
+  return new Response(dashboard(user,rows),{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}});
+}
+if(path==='/project/new'){if(!user)return redirect('/login');if(method==='GET')return new Response(page('مشروع جديد',`<div class="card form"><h1>🎬 مشروع جديد</h1><p class="muted">ابدأ من الفكرة، وبعدها نكمل السيناريو والمشاهد والشخصيات.</p><form method="post"><label class="label">اسم المشروع</label><input class="input" name="title" required maxlength="160" placeholder="مثال: آخر رسالة"><label class="label">الفكرة</label><textarea class="textarea" name="idea" placeholder="ما الذي تريد صنعه؟"></textarea><div class="grid2"><div><label class="label">النوع</label><input class="input" name="genre" placeholder="دراما، كوميديا..."></div><div><label class="label">النبرة</label><input class="input" name="tone" placeholder="مشوق، عاطفي..."></div></div><label class="label">اللغة</label><input class="input" name="language" value="العربية"><div class="actions"><button class="btn primary">إنشاء المشروع</button><a class="btn" href="/dashboard">إلغاء</a></div></form></div>`,user),{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}});const f=await req.formData(),title=String(f.get('title')||'').trim();if(!title)return redirect('/project/new');const id=uid(),t=now();await env.DB.prepare('INSERT INTO projects(id,user_id,title,idea,genre,tone,language,updated_at) VALUES(?,?,?,?,?,?,?,?)').bind(id,user.id,title,String(f.get('idea')||''),String(f.get('genre')||''),String(f.get('tone')||''),String(f.get('language')||'العربية'),t).run();await env.DB.prepare('INSERT INTO scripts(id,project_id,content) VALUES(?,?,?)').bind(uid(),id,'').run();return redirect('/project/'+id)}
+const m=path.match(/^\/project\/([^/]+)(?:\/(.*))?$/);if(m){if(!user)return redirect('/login');const id=m[1],action=m[2]||'';const data=await projectData(env,id,user.id);if(!data)return new Response(page('غير موجود','<div class="card"><h1>المشروع غير موجود</h1><a class="btn" href="/dashboard">العودة</a></div>',user),{status:404,headers:{'content-type':'text/html; charset=utf-8'}});
+if(method==='GET'&&!action)return new Response(projectPage(user,data.p,data.script,data.chars,data.scenes,data.videos),{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}});
+if(method==='POST'&&action==='save'){const f=await req.formData();await env.DB.prepare('UPDATE projects SET title=?,idea=?,genre=?,tone=?,language=?,status=?,updated_at=? WHERE id=? AND user_id=?').bind(String(f.get('title')||'').trim()||data.p.title,String(f.get('idea')||''),String(f.get('genre')||''),String(f.get('tone')||''),String(f.get('language')||'العربية'),['draft','planning','script','production','done'].includes(String(f.get('status'))) ? String(f.get('status')):'draft',now(),id,user.id).run();return redirect('/project/'+id+'#overview')}
+if(method==='POST'&&action==='script'){const f=await req.formData();await env.DB.prepare('UPDATE scripts SET content=?,version=COALESCE(version,0)+1,updated_at=? WHERE project_id=?').bind(String(f.get('content')||''),now(),id).run();await env.DB.prepare('UPDATE projects SET status=?,updated_at=? WHERE id=?').bind('script',now(),id).run();return redirect('/project/'+id+'#script')}
+if(method==='POST'&&action==='delete'){await env.DB.prepare('DELETE FROM videos WHERE project_id=?').bind(id).run();await env.DB.prepare('DELETE FROM scenes WHERE project_id=?').bind(id).run();await env.DB.prepare('DELETE FROM characters WHERE project_id=?').bind(id).run();await env.DB.prepare('DELETE FROM scripts WHERE project_id=?').bind(id).run();await env.DB.prepare('DELETE FROM projects WHERE id=? AND user_id=?').bind(id,user.id).run();return redirect('/dashboard')}
+let cm=action.match(/^characters\/([^/]+)\/delete$/);if(method==='POST'&&cm){await env.DB.prepare('DELETE FROM characters WHERE id=? AND project_id=?').bind(cm[1],id).run();return redirect('/project/'+id+'#characters')}
+if(method==='POST'&&action==='characters/add'){const f=await req.formData();const name=String(f.get('name')||'').trim();if(name)await env.DB.prepare('INSERT INTO characters(id,project_id,name,role,description,traits) VALUES(?,?,?,?,?,?)').bind(uid(),id,name,String(f.get('role')||''),String(f.get('description')||''),String(f.get('traits')||'')).run();return redirect('/project/'+id+'#characters')}
+let vm=action.match(/^scenes\/([^/]+)\/video$/);if(method==='POST'&&vm)return await createSceneVideo(req,env,id,vm[1],user.id);
+let sm=action.match(/^scenes\/([^/]+)\/delete$/);if(method==='POST'&&sm){await env.DB.prepare('DELETE FROM videos WHERE scene_id=? AND project_id=?').bind(sm[1],id).run();await env.DB.prepare('DELETE FROM scenes WHERE id=? AND project_id=?').bind(sm[1],id).run();return redirect('/project/'+id+'#scenes')}
+if(method==='POST'&&action==='scenes/add'){const f=await req.formData();const n=Math.max(1,parseInt(String(f.get('scene_number')||'1'),10)||1);await env.DB.prepare('INSERT INTO scenes(id,project_id,scene_number,title,location,time_of_day,description,dialogue,visual_prompt) VALUES(?,?,?,?,?,?,?,?,?)').bind(uid(),id,n,String(f.get('title')||''),String(f.get('location')||''),String(f.get('time_of_day')||''),String(f.get('description')||''),String(f.get('dialogue')||''),String(f.get('visual_prompt')||'')).run();return redirect('/project/'+id+'#scenes')}
+}
+return isApi(req)?json({error:'Not found'},404):new Response(page('404','<div class="card"><h1>الصفحة غير موجودة</h1><a class="btn" href="/">الرئيسية</a></div>',user),{status:404,headers:{'content-type':'text/html; charset=utf-8'}});
+}catch(e){const detail=String(e?.message||e);return isApi(req)?json({error:'Server error',detail},500):new Response(page('خطأ في الخادم',`<div class="card"><h1>حدث خطأ مؤقت</h1><p class="muted">${esc(detail)}</p><a class="btn primary" href="/dashboard">العودة إلى لوحة التحكم</a></div>`,user),{status:500,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}})}}};
