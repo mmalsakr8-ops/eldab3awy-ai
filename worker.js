@@ -52,19 +52,40 @@ function layout(title,content,user=null){
   </style></head><body><div class="wrap"><nav class="nav"><a class="brand" href="/"><span class="mark">ض</span><span>الضبعاوي AI<small>من الفكرة إلى الفيلم</small></span></a>${user?`<div class="actions"><a class="btn ghost" href="/dashboard">لوحة التحكم</a><form method="post" action="/logout"><button class="btn ghost">خروج</button></form></div>`:''}</nav>${content}<div class="footer">جميع الحقوق محفوظة بواسطة M/ Mohamed Abdalazim</div></div></body></html>`;
 }
 
-async function authPage(req,env,mode){
-  const title = mode==='register'?'إنشاء حساب':'تسجيل الدخول';
-  const action = mode==='register'?'/register':'/login';
-  return new Response(layout(title,`<div class="card" style="max-width:520px;margin:45px auto"><h1>${title}</h1><p class="muted">ابدأ مشروعك السينمائي من مكان واحد.</p><form method="post" action="${action}">${mode==='register'?'<div class="field"><label>الاسم</label><input name="name" required maxlength="80"></div>':''}<div class="field"><label>البريد الإلكتروني</label><input type="email" name="email" required autocomplete="email"></div><div class="field"><label>كلمة المرور</label><input type="password" name="password" required minlength="6" autocomplete="current-password"></div><button class="btn primary" style="width:100%">${title}</button></form><p class="muted" style="margin-bottom:0">${mode==='register'?'<a href="/login">لديك حساب؟ تسجيل الدخول</a>':'<a href="/register">ليس لديك حساب؟ إنشاء حساب</a>'}</p></div>`),null,{headers:{'content-type':'text/html; charset=utf-8'}});
+async function authPage(req,env,mode,error=''){
+  const reg=mode==='register';
+  const title=reg?'إنشاء حساب جديد':'تسجيل الدخول';
+  const action=reg?'/register':'/login';
+  const passwordAutocomplete=reg?'new-password':'current-password';
+  const passwordHint=reg?'8 أحرف على الأقل':'أدخل كلمة المرور';
+  const errorBox=error?`<div class="card" style="border-color:#ff809555;background:#3a1220"><strong class="err">${esc(error)}</strong></div>`:'';
+  const nameField=reg?'<div class="field"><label>الاسم</label><input name="name" required maxlength="80" autocomplete="name" placeholder="اكتب اسمك"></div>':'';
+  return new Response(layout(title,`${errorBox}<div class="card" style="max-width:520px;margin:45px auto"><h1>${title}</h1><p class="muted">${reg?'أنشئ حسابك مرة واحدة وابدأ مشروعك السينمائي مباشرة.':'أدخل بيانات حسابك للمتابعة.'}</p><form method="post" action="${action}" autocomplete="${reg?'on':'on'}">${nameField}<div class="field"><label>البريد الإلكتروني</label><input type="email" name="email" required maxlength="160" autocomplete="email" placeholder="name@example.com"></div><div class="field"><label>كلمة المرور</label><input type="password" name="password" required minlength="8" maxlength="128" autocomplete="${passwordAutocomplete}" placeholder="${passwordHint}"></div><button class="btn primary" type="submit" style="width:100%">${reg?'إنشاء الحساب والبدء':'دخول'}</button></form><p class="muted" style="margin-bottom:0;text-align:center">${reg?'لديك حساب بالفعل؟ <a href="/login">تسجيل الدخول</a>':'ليس لديك حساب؟ <a href="/register">إنشاء حساب جديد</a>'}</p></div>`),null,{headers:{'content-type':'text/html; charset=utf-8'}});
 }
 
 async function register(req,env){
-  const form=await req.formData(); const name=String(form.get('name')||'').trim(); const email=String(form.get('email')||'').trim().toLowerCase(); const password=String(form.get('password')||'');
-  if(!name||!email||password.length<6)return new Response(layout('خطأ','<div class="card"><h2>البيانات غير مكتملة</h2><a class="btn ghost" href="/register">رجوع</a></div>'),{status:400,headers:{'content-type':'text/html; charset=utf-8'}});
-  const exists=await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first(); if(exists)return new Response(layout('الحساب موجود','<div class="card"><h2>البريد مستخدم بالفعل.</h2><a class="btn ghost" href="/login">تسجيل الدخول</a></div>'),{status:409,headers:{'content-type':'text/html; charset=utf-8'}});
-  const role=email===ADMIN_EMAIL?'admin':'user'; const id=uid(); const ph=await hashPassword(password);
-  await env.DB.prepare('INSERT INTO users(id,name,email,password_hash,role) VALUES(?,?,?,?,?)').bind(id,name,email,ph,role).run();
-  return Response.redirect(new URL('/login',req.url),303);
+  try{
+    const form=await req.formData();
+    const name=String(form.get('name')||'').trim();
+    const email=String(form.get('email')||'').trim().toLowerCase();
+    const password=String(form.get('password')||'');
+    if(name.length<2)return authPage(req,env,'register','اكتب اسمًا صحيحًا.');
+    if(!email)return authPage(req,env,'register','اكتب البريد الإلكتروني.');
+    if(password.length<8)return authPage(req,env,'register','كلمة المرور يجب أن تكون 8 أحرف على الأقل.');
+    const exists=await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
+    if(exists)return authPage(req,env,'register','هذا البريد الإلكتروني مستخدم بالفعل. يمكنك تسجيل الدخول بدلًا من إنشاء حساب جديد.');
+    const role=email===ADMIN_EMAIL?'admin':'user';
+    const id=uid();
+    const ph=await hashPassword(password);
+    await env.DB.prepare('INSERT INTO users(id,name,email,password_hash,role) VALUES(?,?,?,?,?)').bind(id,name,email,ph,role).run();
+    const token=crypto.randomUUID()+'-'+crypto.randomUUID();
+    const th=await sha256(token);
+    const expires=new Date(Date.now()+SESSION_DAYS*86400000).toISOString();
+    await env.DB.prepare('INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?,?,?,?)').bind(uid(),id,th,expires).run();
+    return new Response(null,{status:303,headers:{Location:'/dashboard','Set-Cookie':cookie(COOKIE,token,SESSION_DAYS*86400)}});
+  }catch(e){
+    return authPage(req,env,'register','تعذر إنشاء الحساب حاليًا. تأكد أن قاعدة البيانات جاهزة ثم حاول مرة أخرى.');
+  }
 }
 
 async function login(req,env){
