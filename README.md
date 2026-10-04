@@ -1,21 +1,15 @@
-# الضبعاوي AI — Rebuild Video MVP
+# الضبعاوي AI
 
-هذه النسخة لا تستخدم R2.
+نسخة كاملة من مشروع الضبعاوي AI مع توليد فيديو للمشهد وتسليمه للمتصفح كملف MP4 للتشغيل والتنزيل على الهاتف، بدون R2 وبدون حفظ دائم للفيديو على السيرفر.
 
-الفكرة: المشهد يرسل إلى Hugging Face Inference Providers عبر Secret باسم `HF_TOKEN`، وعند اكتمال الفيديو يعيده Worker كـ `video/mp4` إلى المتصفح، ثم يظهر زر تحميل مباشر على الموبايل.
+## Cloudflare
+- Worker: `eldab3awy-ai`
+- D1 binding: `DB`
+- Database: `eldab3awy-db`
+- Secret المطلوب: `HF_TOKEN`
 
-## Secrets
-في Cloudflare Worker > Settings > Variables and Secrets > Production أضف Secret:
-- Name: HF_TOKEN
-- Value: Hugging Face token بصلاحية Inference Providers
+## النشر
+`npx wrangler deploy`
 
-لا تضع قيمة التوكن داخل wrangler.jsonc أو GitHub.
-
-## D1
-نفّذ schema.sql على قاعدة `eldab3awy-db` في بيئة الاختبار. الملف يعيد إنشاء جداول المشروع ويزيل الجداول القديمة الخاصة بهذا المشروع.
-
-## Deploy
-npx wrangler deploy
-
-## ملاحظة الفيديو
-لا يوجد تخزين دائم للفيديو في هذه النسخة. الفيديو يُولد ويعود مباشرة للمتصفح، ومن هناك يمكن تحميله على الموبايل. التخزين الدائم يمكن إضافته لاحقاً عبر Object Storage.
+## الفيديو
+بعد نجاح التوليد يظهر الفيديو وزر `⬇️ تنزيل الفيديو`. لا يعتمد المشروع على R2.

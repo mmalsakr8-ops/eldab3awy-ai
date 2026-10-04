@@ -1,1 +1,8 @@
-{"name":"eldab3awy-ai","private":true,"type":"module","dependencies":{"@huggingface/inference":"^4.13.30"},"devDependencies":{"wrangler":"^4.147.0"}}
+{
+  "name": "eldab3awy-ai",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@huggingface/inference": "4.13.30"
+  }
+}
