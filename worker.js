@@ -21,13 +21,33 @@ async function hashPassword(password){
   return salt + '$' + [...new Uint8Array(bits)].map(x=>x.toString(16).padStart(2,'0')).join('');
 }
 async function verifyPassword(password, stored){
-  const [salt, wanted] = String(stored||'').split('$');
-  if(!salt || !wanted) return false;
-  const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({name:'PBKDF2',salt:enc.encode(salt),iterations:120000,hash:'SHA-256'}, key, 256);
-  const got = [...new Uint8Array(bits)].map(x=>x.toString(16).padStart(2,'0')).join('');
-  return got === wanted;
+  const value=String(stored||'').trim();
+  if(!value) return {ok:false,legacy:false};
+
+  // Current format: salt$PBKDF2-SHA256(120000)$hex
+  const parts=value.split('$');
+  if(parts.length===2){
+    const [salt,wanted]=parts;
+    if(!salt || !wanted) return {ok:false,legacy:false};
+    const key=await crypto.subtle.importKey('raw',enc.encode(password),'PBKDF2',false,['deriveBits']);
+    // Accept the common legacy PBKDF2 iteration counts used by earlier builds.
+    for(const iterations of [120000,100000,150000]){
+      const bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt:enc.encode(salt),iterations,hash:'SHA-256'},key,256);
+      const got=[...new Uint8Array(bits)].map(x=>x.toString(16).padStart(2,'0')).join('');
+      if(got===wanted) return {ok:true,legacy:iterations!==120000};
+    }
+    return {ok:false,legacy:false};
+  }
+
+  // Legacy builds stored SHA-256(password) directly (64 hex characters).
+  if(/^[0-9a-f]{64}$/i.test(value)){
+    const got=await sha256(password);
+    return {ok:got.toLowerCase()===value.toLowerCase(),legacy:got.toLowerCase()===value.toLowerCase()};
+  }
+
+  return {ok:false,legacy:false};
 }
+
 function json(data,status=200,headers={}){
   return new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store',...headers}});
 }
@@ -92,10 +112,16 @@ async function register(req,env){
 async function login(req,env){
   const form=await req.formData(); const email=String(form.get('email')||'').trim().toLowerCase(); const password=String(form.get('password')||'');
   const u=await env.DB.prepare('SELECT * FROM users WHERE email=?').bind(email).first();
-  if(!u || !(await verifyPassword(password,u.password_hash)))return new Response(layout('فشل الدخول','<div class="card"><h2>البريد أو كلمة المرور غير صحيحة.</h2><a class="btn ghost" href="/login">حاول مرة أخرى</a></div>'),{status:401,headers:{'content-type':'text/html; charset=utf-8'}});
+  const checked=u ? await verifyPassword(password,u.password_hash) : {ok:false,legacy:false};
+  if(!checked.ok)return new Response(loginPage('البريد الإلكتروني أو كلمة المرور غير صحيحة.'),{status:401,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store, no-cache, must-revalidate, max-age=0','pragma':'no-cache','x-auth-page':'login'}});
+  // If this account came from an older password format, transparently upgrade it.
+  if(checked.legacy){
+    const upgraded=await hashPassword(password);
+    await env.DB.prepare('UPDATE users SET password_hash=? WHERE id=?').bind(upgraded,u.id).run();
+  }
   const token=crypto.randomUUID()+'-'+crypto.randomUUID(); const th=await sha256(token); const expires=new Date(Date.now()+SESSION_DAYS*86400000).toISOString();
   await env.DB.prepare('INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?,?,?,?)').bind(uid(),u.id,th,expires).run();
-  return new Response(null,{status:303,headers:{Location:'/dashboard','Set-Cookie':cookie(COOKIE,token,SESSION_DAYS*86400)}});
+  return new Response(null,{status:303,headers:{Location:'/dashboard','Set-Cookie':cookie(COOKIE,token,SESSION_DAYS*86400),'Cache-Control':'no-store','X-Auth-Page':'login'}});
 }
 
 async function logout(req,env){
